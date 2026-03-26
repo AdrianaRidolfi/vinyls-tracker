@@ -28,6 +28,7 @@
         
         <label>Link</label>
         <input type="url" id="url_amazon" placeholder="URL Amazon">
+        <input type="url" id="url_feltrinelli" placeholder="URL Feltrinelli">
         <input type="url" id="url_other" placeholder="URL Alternativo">
         
         <button id="submitBtn" onclick="sendData()">Inserisci Vinile</button>
@@ -35,7 +36,6 @@
     </div>
 
     <script>
-        // Load stored PAT on page load
         document.getElementById('gh_token').value = localStorage.getItem('gh_pat') || '';
 
         async function sendData() {
@@ -51,15 +51,12 @@
                 return;
             }
 
-            // Save PAT for future sessions
             localStorage.setItem('gh_pat', token);
 
-            // Set UI to loading state
             btn.disabled = true;
             status.innerText = "Invio in corso...";
             status.style.color = "#eee";
 
-            // Prepare payload
             const payload = {
                 event_type: 'add_vinyl',
                 client_payload: {
@@ -67,14 +64,14 @@
                     title: title,
                     urls: [
                         { name: 'Amazon', url: document.getElementById('url_amazon').value },
+                        { name: 'Feltrinelli', url: document.getElementById('url_feltrinelli').value },
                         { name: 'Altro', url: document.getElementById('url_other').value }
                     ].filter(u => u.url)
                 }
             };
 
-            // Send POST request to GitHub API
             try {
-                const response = await fetch('https://api.github.com/repos//adrianaridolfi/vinyls-tracker/dispatches', {
+                const response = await fetch('https://api.github.com/repos/adrianaridolfi/vinyls-tracker/dispatches', {
                     method: 'POST',
                     headers: {
                         'Authorization': `Bearer ${token}`,
@@ -83,25 +80,23 @@
                     body: JSON.stringify(payload)
                 });
 
-                // Handle API response
                 if (response.ok) {
                     status.innerText = "Vinile inviato con successo.";
                     status.style.color = "#28a745";
                     
-                    // Clear input fields
                     document.getElementById('artist').value = '';
                     document.getElementById('title').value = '';
                     document.getElementById('url_amazon').value = '';
+                    document.getElementById('url_feltrinelli').value = '';
                     document.getElementById('url_other').value = '';
                 } else {
-                    status.innerText = "Errore di invio. Verifica il PAT e il nome del repository.";
+                    status.innerText = "Errore di invio. Verifica il PAT e i permessi.";
                     status.style.color = "#dc3545";
                 }
             } catch (error) {
                 status.innerText = "Errore di rete.";
                 status.style.color = "#dc3545";
             } finally {
-                // Restore button state
                 btn.disabled = false;
             }
         }
