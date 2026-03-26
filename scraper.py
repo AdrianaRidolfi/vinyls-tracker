@@ -62,7 +62,6 @@ def parse_price(price_str):
     return None
 
 def extract_json_ld_price(soup):
-    # Cerca il prezzo nei metadati SEO (invisibili ma sempre presenti per Google)
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
@@ -95,35 +94,43 @@ def extract_image(soup):
     return None
 
 def scrape_amazon(soup):
-    # Prova 1: Selettore intero + frazione
     whole = soup.find("span", {"class": "a-price-whole"})
     fraction = soup.find("span", {"class": "a-price-fraction"})
     if whole and fraction:
         return parse_price(whole.text.strip() + "." + fraction.text.strip())
     
-    # Prova 2: Classe hidden generica
     offscreen = soup.find("span", {"class": "a-offscreen"})
     if offscreen:
         return parse_price(offscreen.text)
         
-    # Prova 3: Selettori ID vecchi
     for pid in ["priceblock_ourprice", "priceblock_dealprice"]:
         ptag = soup.find("span", id=pid)
         if ptag:
             return parse_price(ptag.text)
             
+    # Ricerca bruta per Amazon
+    price_tag = soup.find("span", class_="a-color-price")
+    if price_tag:
+        return parse_price(price_tag.text)
+
     return None
 
 def scrape_feltrinelli(soup):
-    # Prova 1: Metadati SEO JSON-LD (molto più affidabile)
     json_price = extract_json_ld_price(soup)
     if json_price:
         return json_price
 
-    # Prova 2: Fallback HTML
+    # Ricerca bruta nelle variabili Javascript di Feltrinelli
+    for script in soup.find_all("script"):
+        if script.string and "price" in script.string.lower():
+            match = re.search(r'"price"\s*:\s*"?(\d+[.,]\d{2})"?', script.string)
+            if match:
+                return parse_price(match.group(1))
+
     price_tag = soup.find("span", {"class": "price"})
     if price_tag:
         return parse_price(price_tag.text)
+        
     return None
 
 def scrape_other(soup, url):
@@ -155,7 +162,6 @@ def scrape_other(soup, url):
 def get_current_data(url, site_name):
     print(f"Controllo {site_name}: {url}")
     
-    # Cloudscraper emula un browser Chrome per aggirare i controlli
     scraper = cloudscraper.create_scraper(browser={
         'browser': 'chrome',
         'platform': 'windows',
@@ -170,9 +176,12 @@ def get_current_data(url, site_name):
     
     try:
         response = scraper.get(url, headers=headers, timeout=20)
-        print(f"[{site_name}] Status Code: {response.status_code}")
-        
         soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Stampa il titolo della pagina per capire se c'è un blocco CAPTCHA
+        page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
+        print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
+        
         image_url = extract_image(soup)
         price = None
         
@@ -185,7 +194,7 @@ def get_current_data(url, site_name):
             price = scrape_other(soup, url)
             
         if price is None:
-            print(f"Prezzo non trovato per {site_name}. Struttura modificata o blocco attivo.")
+            print(f"Prezzo non trovato per {site_name}.")
             
         return price, image_url
     except Exception as e:
