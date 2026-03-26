@@ -1,0 +1,35 @@
+name: Add Vinyl to DB
+on:
+  repository_dispatch:
+    types: [add_vinyl]
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Install Python & Supabase
+        run: pip install supabase
+      - name: Write to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          python -c "
+          import os, json
+          from supabase import create_client
+          payload = json.loads(os.environ['PAYLOAD'])
+          supabase = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
+          
+          # Inserimento vinile
+          res = supabase.table('vinyls').insert({'artist': payload['artist'], 'title': payload['title']}).execute()
+          v_id = res.data[0]['id']
+          
+          # Inserimento sorgenti
+          for url in payload['urls']:
+              name = 'Amazon' if 'amazon' in url else 'Altro'
+              supabase.table('sources').insert({'vinyl_id': v_id, 'site_name': name, 'url': url}).execute()
+          print('Dati inseriti correttamente')
+          "
