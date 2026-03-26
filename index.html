@@ -1,1 +1,91 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vinyl Tracker - Adriana</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #f4f4f9; padding: 20px; display: flex; justify-content: center; }
+        .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        h2 { margin-top: 0; color: #333; }
+        label { display: block; margin: 10px 0 5px; font-weight: bold; font-size: 0.9em; }
+        input { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: #24292e; color: white; border: none; border-radius: 4px; margin-top: 20px; cursor: pointer; font-size: 1em; }
+        button:hover { background: #000; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Aggiungi Vinile</h2>
+        <label>Artista</label>
+        <input type="text" id="artist" placeholder="Es: Pink Floyd">
+        
+        <label>Titolo</label>
+        <input type="text" id="title" placeholder="Es: The Wall">
+        
+        <hr style="margin: 20px 0; border: 0; border-top: 1px solid #eee;">
+        
+        <label>URL Amazon.it</label>
+        <input type="url" id="url_amazon" placeholder="https://amazon.it/...">
+        
+        <label>URL Feltrinelli</label>
+        <input type="url" id="url_feltrinelli" placeholder="https://lafeltrinelli.it/...">
+        
+        <label>URL Usato/Altro</label>
+        <input type="url" id="url_other" placeholder="https://...">
+        
+        <button onclick="saveData()">Monitora Vinile</button>
+    </div>
 
+    <script>
+        const SUPABASE_URL = 'IL_TUO_URL';
+        const SUPABASE_KEY = 'LA_TUA_KEY';
+        const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        async function saveData() {
+            const artist = document.getElementById('artist').value;
+            const title = document.getElementById('title').value;
+            
+            if(!artist || !title) return alert("Inserisci artista e titolo");
+
+            // Inserimento vinile
+            const { data: vData, error: vError } = await _supabase
+                .from('vinyls')
+                .insert([{ artist, title }])
+                .select();
+
+            if (vError) return alert("Errore: " + vError.message);
+            const vinylId = vData[0].id;
+
+            // Preparazione sorgenti
+            const sources = [];
+            const sites = [
+                { id: 'url_amazon', name: 'Amazon' },
+                { id: 'url_feltrinelli', name: 'Feltrinelli' },
+                { id: 'url_other', name: 'Altro' }
+            ];
+
+            sites.forEach(site => {
+                const val = document.getElementById(site.id).value;
+                if(val) {
+                    sources.push({
+                        vinyl_id: vinylId,
+                        site_name: site.name,
+                        url: val
+                    });
+                }
+            });
+
+            if(sources.length > 0) {
+                const { error: sError } = await _supabase.from('sources').insert(sources);
+                if (sError) alert("Errore sorgenti: " + sError.message);
+                else {
+                    alert("Vinile aggiunto! Lo scraper lo caricherà al prossimo avvio.");
+                    location.reload();
+                }
+            }
+        }
+    </script>
+</body>
+</html>
