@@ -1,6 +1,8 @@
 import os
 import re
 import requests
+import time
+import random
 from bs4 import BeautifulSoup
 from supabase import create_client
 
@@ -113,6 +115,7 @@ def process_vinyls():
         new_prices_data = []
         
         for source in sources:
+            time.sleep(random.uniform(2, 6))
             new_price = get_current_price(source["url"], source["site_name"])
             
             if new_price is not None:
