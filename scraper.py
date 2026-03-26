@@ -94,24 +94,33 @@ def extract_image(soup):
     return None
 
 def scrape_amazon(soup):
+    # 1. Cerca nel box principale del prezzo (layout moderno Amazon)
+    core_price = soup.find("div", id="corePriceDisplay_desktop_feature_div") or soup.find("div", id="corePrice_desktop")
+    if core_price:
+        offscreen = core_price.find("span", class_="a-offscreen")
+        if offscreen:
+            return parse_price(offscreen.text)
+            
+    # 2. Cerca nella griglia di selezione formato (specifico per CD/Vinili)
+    swatches = soup.find("div", id="tmmSwatches")
+    if swatches:
+        selected = swatches.find("li", class_="selected") or swatches.find("li", class_="swatchElement selected")
+        if selected:
+            price_tag = selected.find("span", class_="a-color-price")
+            if price_tag:
+                return parse_price(price_tag.text)
+
+    # 3. Cerca nei classici ID del Buy Box
+    for pid in ["newBuyBoxPrice", "price_inside_buybox", "price", "priceblock_ourprice", "priceblock_dealprice"]:
+        ptag = soup.find("span", id=pid)
+        if ptag:
+            return parse_price(ptag.text)
+
+    # 4. Fallback sulla prima combinazione intero+frazione
     whole = soup.find("span", {"class": "a-price-whole"})
     fraction = soup.find("span", {"class": "a-price-fraction"})
     if whole and fraction:
         return parse_price(whole.text.strip() + "." + fraction.text.strip())
-    
-    offscreen = soup.find("span", {"class": "a-offscreen"})
-    if offscreen:
-        return parse_price(offscreen.text)
-        
-    for pid in ["priceblock_ourprice", "priceblock_dealprice"]:
-        ptag = soup.find("span", id=pid)
-        if ptag:
-            return parse_price(ptag.text)
-            
-    # Ricerca bruta per Amazon
-    price_tag = soup.find("span", class_="a-color-price")
-    if price_tag:
-        return parse_price(price_tag.text)
 
     return None
 
@@ -120,7 +129,6 @@ def scrape_feltrinelli(soup):
     if json_price:
         return json_price
 
-    # Ricerca bruta nelle variabili Javascript di Feltrinelli
     for script in soup.find_all("script"):
         if script.string and "price" in script.string.lower():
             match = re.search(r'"price"\s*:\s*"?(\d+[.,]\d{2})"?', script.string)
@@ -176,9 +184,8 @@ def get_current_data(url, site_name):
     
     try:
         response = scraper.get(url, headers=headers, timeout=20)
-        soup = BeautifulSoup(response.content, "html.parser")
         
-        # Stampa il titolo della pagina per capire se c'è un blocco CAPTCHA
+        soup = BeautifulSoup(response.content, "html.parser")
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
