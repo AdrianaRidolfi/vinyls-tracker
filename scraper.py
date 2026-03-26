@@ -1,8 +1,9 @@
 import os
 import re
 import time
+import json
 import random
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from supabase import create_client
 
@@ -19,7 +20,6 @@ def format_eur(price_float):
 def send_telegram_alert(msg_text, link_url, cover_url=None):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
-    # Creazione del bottone cliccabile
     reply_markup = {
         "inline_keyboard": [[{"text": "Vedi Offerta", "url": link_url}]]
     }
@@ -43,7 +43,7 @@ def send_telegram_alert(msg_text, link_url, cover_url=None):
         }
         
     try:
-        response = requests.post(endpoint, json=payload, timeout=10)
+        response = cloudscraper.create_scraper().post(endpoint, json=payload, timeout=10)
         if not response.ok:
             print(f"Errore API Telegram: {response.text}")
     except Exception as e:
@@ -52,7 +52,7 @@ def send_telegram_alert(msg_text, link_url, cover_url=None):
 def parse_price(price_str):
     if not price_str:
         return None
-    match = re.search(r'\d+[.,]\d{2}', price_str)
+    match = re.search(r'\d+[.,]\d{2}', str(price_str))
     if match:
         clean_str = match.group().replace(',', '.')
         try:
@@ -61,13 +61,33 @@ def parse_price(price_str):
             return None
     return None
 
+def extract_json_ld_price(soup):
+    # Cerca il prezzo nei metadati SEO (invisibili ma sempre presenti per Google)
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string)
+            if isinstance(data, list):
+                for item in data:
+                    if item.get('@type') in ['Product', 'Book', 'MusicAlbum'] and 'offers' in item:
+                        offers = item['offers']
+                        if isinstance(offers, list):
+                            return float(offers[0].get('price'))
+                        return float(offers.get('price'))
+            elif isinstance(data, dict):
+                if data.get('@type') in ['Product', 'Book', 'MusicAlbum'] and 'offers' in data:
+                    offers = data['offers']
+                    if isinstance(offers, list):
+                        return float(offers[0].get('price'))
+                    return float(offers.get('price'))
+        except:
+            continue
+    return None
+
 def extract_image(soup):
-    # Cerca il tag standard open graph usato dalla maggior parte dei siti
     meta_og = soup.find("meta", property="og:image")
     if meta_og and meta_og.get("content"):
         return meta_og["content"]
     
-    # Fallback per Amazon
     amz_img = soup.find("img", id="landingImage")
     if amz_img and amz_img.get("src"):
         return amz_img["src"]
@@ -75,18 +95,32 @@ def extract_image(soup):
     return None
 
 def scrape_amazon(soup):
+    # Prova 1: Selettore intero + frazione
     whole = soup.find("span", {"class": "a-price-whole"})
     fraction = soup.find("span", {"class": "a-price-fraction"})
     if whole and fraction:
         return parse_price(whole.text.strip() + "." + fraction.text.strip())
     
+    # Prova 2: Classe hidden generica
     offscreen = soup.find("span", {"class": "a-offscreen"})
     if offscreen:
         return parse_price(offscreen.text)
         
+    # Prova 3: Selettori ID vecchi
+    for pid in ["priceblock_ourprice", "priceblock_dealprice"]:
+        ptag = soup.find("span", id=pid)
+        if ptag:
+            return parse_price(ptag.text)
+            
     return None
 
 def scrape_feltrinelli(soup):
+    # Prova 1: Metadati SEO JSON-LD (molto più affidabile)
+    json_price = extract_json_ld_price(soup)
+    if json_price:
+        return json_price
+
+    # Prova 2: Fallback HTML
     price_tag = soup.find("span", {"class": "price"})
     if price_tag:
         return parse_price(price_tag.text)
@@ -99,6 +133,10 @@ def scrape_other(soup, url):
             val = parse_price(price_div.text)
             if val is not None:
                 return val
+
+    json_price = extract_json_ld_price(soup)
+    if json_price:
+        return json_price
 
     price_elements = soup.find_all(class_=re.compile("price", re.I))
     for el in price_elements:
@@ -116,16 +154,25 @@ def scrape_other(soup, url):
 
 def get_current_data(url, site_name):
     print(f"Controllo {site_name}: {url}")
+    
+    # Cloudscraper emula un browser Chrome per aggirare i controlli
+    scraper = cloudscraper.create_scraper(browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    })
+    
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://www.google.com/"
     }
+    
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        soup = BeautifulSoup(response.content, "html.parser")
+        response = scraper.get(url, headers=headers, timeout=20)
+        print(f"[{site_name}] Status Code: {response.status_code}")
         
+        soup = BeautifulSoup(response.content, "html.parser")
         image_url = extract_image(soup)
         price = None
         
@@ -138,11 +185,11 @@ def get_current_data(url, site_name):
             price = scrape_other(soup, url)
             
         if price is None:
-            print(f"Prezzo non trovato per {site_name}. Struttura pagina modificata o blocco anti-bot.")
+            print(f"Prezzo non trovato per {site_name}. Struttura modificata o blocco attivo.")
             
         return price, image_url
     except Exception as e:
-        print(f"Errore scraping {url}: {e}")
+        print(f"Errore scraping {site_name} - {url}: {e}")
         return None, None
 
 def process_vinyls():
@@ -165,10 +212,9 @@ def process_vinyls():
         cover_updated = False
         
         for source in sources:
-            time.sleep(random.uniform(3, 7))
+            time.sleep(random.uniform(4, 8))
             new_price, fetched_image = get_current_data(source["url"], source["site_name"])
             
-            # Aggiorna la copertina nel DB se manca e l'abbiamo trovata
             if not cover_url and fetched_image and not cover_updated:
                 supabase.table("vinyls").update({"cover_url": fetched_image}).eq("id", vinyl["id"]).execute()
                 cover_url = fetched_image
@@ -194,7 +240,6 @@ def process_vinyls():
         new_lowest = min(valid_new_prices)
         lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
 
-        # Logica per la prima esecuzione
         if old_lowest is None:
             msg = f"<b>Inizio Monitoraggio</b>\n{artist} - {title}\n\n"
             msg += "Prezzi iniziali:\n"
@@ -205,13 +250,12 @@ def process_vinyls():
             send_telegram_alert(msg, lowest_data['url'], cover_url)
             continue
 
-        # Logica per i ribassi
         if new_lowest < old_lowest:
             drop_eur = old_lowest - new_lowest
             drop_pct = (drop_eur / old_lowest) * 100
             
             msg = f"<b>Calo di prezzo!</b>\n{artist} - {title}\n\n"
-            msg += f"Il prezzo minimo e sceso a <b>{format_eur(new_lowest)}</b> su {lowest_data['site_name']}.\n"
+            msg += f"Il prezzo minimo è sceso a <b>{format_eur(new_lowest)}</b> su {lowest_data['site_name']}.\n"
             msg += f"Risparmio: {format_eur(drop_eur)} ({drop_pct:.1f}%).\n\n"
             msg += f"Precedente minimo: {format_eur(old_lowest)}"
             send_telegram_alert(msg, lowest_data['url'], cover_url)
