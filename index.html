@@ -3,63 +3,106 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vinyl Registry - Secure</title>
+    <title>Vinyl Registry</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #121212; color: #eee; }
-        .card { max-width: 400px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 12px; }
-        input { width: 100%; padding: 12px; margin: 8px 0; border-radius: 6px; border: 1px solid #333; background: #252525; color: white; box-sizing: border-box; }
-        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; }
-        .status { margin-top: 15px; font-size: 0.9em; text-align: center; }
+        body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 20px; }
+        .container { max-width: 400px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 8px; }
+        h2 { margin-top: 0; color: #007bff; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        label { display: block; margin: 10px 0 5px; font-size: 0.8em; color: #888; }
+        input { width: 100%; padding: 12px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #333; background: #252525; color: white; box-sizing: border-box; }
+        button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; }
+        button:disabled { background: #444; cursor: not-allowed; }
+        .status-msg { margin-top: 15px; text-align: center; font-size: 0.9em; min-height: 1.2em; font-weight: bold; }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h2>Aggiungi Vinile</h2>
-        <input type="password" id="gh_token" placeholder="GitHub PAT (inserisci una volta)">
+    <div class="container">
+        <h2>Nuovo Vinile</h2>
+        
+        <label>GitHub Personal Access Token</label>
+        <input type="password" id="gh_token" placeholder="Inserisci il PAT">
+        
+        <label>Dettagli</label>
         <input type="text" id="artist" placeholder="Artista">
         <input type="text" id="title" placeholder="Titolo">
-        <input type="url" id="url_1" placeholder="URL Amazon">
-        <input type="url" id="url_2" placeholder="URL Altro">
-        <button onclick="triggerDispatch()">Invia a GitHub Actions</button>
-        <div id="status" class="status"></div>
+        
+        <label>Link</label>
+        <input type="url" id="url_amazon" placeholder="URL Amazon">
+        <input type="url" id="url_other" placeholder="URL Alternativo">
+        
+        <button id="submitBtn" onclick="sendData()">Inserisci Vinile</button>
+        <div id="status" class="status-msg"></div>
     </div>
 
     <script>
-        // Carica il token se salvato precedentemente
+        // Load stored PAT on page load
         document.getElementById('gh_token').value = localStorage.getItem('gh_pat') || '';
 
-        async function triggerDispatch() {
-            const token = document.getElementById('gh_token').value;
+        async function sendData() {
+            const btn = document.getElementById('submitBtn');
             const status = document.getElementById('status');
-            
-            localStorage.setItem('gh_pat', token); // Salva per la prossima volta
+            const token = document.getElementById('gh_token').value;
+            const artist = document.getElementById('artist').value;
+            const title = document.getElementById('title').value;
 
+            if (!token || !artist || !title) {
+                status.innerText = "Errore: Compila PAT, Artista e Titolo.";
+                status.style.color = "#dc3545";
+                return;
+            }
+
+            // Save PAT for future sessions
+            localStorage.setItem('gh_pat', token);
+
+            // Set UI to loading state
+            btn.disabled = true;
+            status.innerText = "Invio in corso...";
+            status.style.color = "#eee";
+
+            // Prepare payload
             const payload = {
                 event_type: 'add_vinyl',
                 client_payload: {
-                    artist: document.getElementById('artist').value,
-                    title: document.getElementById('title').value,
-                    urls: [document.getElementById('url_1').value, document.getElementById('url_2').value].filter(u => u)
+                    artist: artist,
+                    title: title,
+                    urls: [
+                        { name: 'Amazon', url: document.getElementById('url_amazon').value },
+                        { name: 'Altro', url: document.getElementById('url_other').value }
+                    ].filter(u => u.url)
                 }
             };
 
-            status.innerText = 'Invio comando...';
+            // Send POST request to GitHub API
+            try {
+                const response = await fetch('https://api.github.com/repos//adrianaridolfi/vinyls-tracker/dispatches', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Accept': 'application/vnd.github.v3+json'
+                    },
+                    body: JSON.stringify(payload)
+                });
 
-            const response = await fetch('https://api.github.com/repos/TUO_USERNAME/TUO_REPO/dispatches', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Accept': 'application/vnd.github.v3+json'
-                },
-                body: JSON.stringify(payload)
-            });
-
-            if (response.ok) {
-                status.style.color = '#28a745';
-                status.innerText = 'Comando ricevuto! GitHub Action partita.';
-            } else {
-                status.style.color = '#dc3545';
-                status.innerText = 'Errore: controlla il Token o il nome repo.';
+                // Handle API response
+                if (response.ok) {
+                    status.innerText = "Vinile inviato con successo.";
+                    status.style.color = "#28a745";
+                    
+                    // Clear input fields
+                    document.getElementById('artist').value = '';
+                    document.getElementById('title').value = '';
+                    document.getElementById('url_amazon').value = '';
+                    document.getElementById('url_other').value = '';
+                } else {
+                    status.innerText = "Errore di invio. Verifica il PAT e il nome del repository.";
+                    status.style.color = "#dc3545";
+                }
+            } catch (error) {
+                status.innerText = "Errore di rete.";
+                status.style.color = "#dc3545";
+            } finally {
+                // Restore button state
+                btn.disabled = false;
             }
         }
     </script>
