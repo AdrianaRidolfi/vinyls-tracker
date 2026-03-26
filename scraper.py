@@ -1,203 +1,163 @@
 import os
-import time
-import random
+import re
 import requests
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-from supabase import create_client, Client
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, 
-    CommandHandler, 
-    ContextTypes, 
-    ConversationHandler, 
-    MessageHandler, 
-    filters,
-    CallbackQueryHandler
-)
+from supabase import create_client
 
-load_dotenv()
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
-# Configurazione variabili d'ambiente
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# Lista di ID separati da virgola, es: 123456,789012
-ALLOWED_USERS = [int(i.strip()) for i in os.getenv("ALLOWED_USERS").split(",")]
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Stati per la conversazione /add
-ARTIST, TITLE, URL_AMZ, URL_FELT, URL_DISC = range(5)
-
-def scrape_price(url, site_name):
+def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
     try:
-        response = requests.get(url, headers=get_headers(), timeout=10)
-        if response.status_code != 200:
-            return None
-        
-        soup = BeautifulSoup(response.content, "html.parser")
-        price = None
-
-        if site_name == "amazon":
-            # Cerca il prezzo intero e i decimali
-            price_span = soup.find("span", {"class": "a-price-whole"})
-            fraction_span = soup.find("span", {"class": "a-price-fraction"})
-            if price_span:
-                price_str = price_span.get_text().replace(",", "").replace(".", "")
-                fraction_str = fraction_span.get_text() if fraction_span else "00"
-                price = float(f"{price_str}.{fraction_str}")
-
-        elif site_name == "feltrinelli":
-            price_tag = soup.find("span", {"class": "advisor-price"})
-            if price_tag:
-                price = float(price_tag.get_text().replace("€", "").replace(",", ".").strip())
-
-        elif site_name == "discoteca_laziale":
-            price_tag = soup.find("span", {"class": "price"})
-            if price_tag:
-                price = float(price_tag.get_text().replace("€", "").replace(",", ".").strip())
-
-        return price
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Errore durante lo scraping di {url}: {e}")
+        print(f"Errore invio Telegram: {e}")
+
+def parse_price(price_str):
+    if not price_str:
+        return None
+    
+    # Cerca un pattern numerico con due decimali (es. 27,40 o 27.40)
+    match = re.search(r'\d+[.,]\d{2}', price_str)
+    if match:
+        clean_str = match.group().replace(',', '.')
+        try:
+            return float(clean_str)
+        except ValueError:
+            return None
+    return None
+
+def scrape_amazon(soup):
+    whole = soup.find("span", {"class": "a-price-whole"})
+    fraction = soup.find("span", {"class": "a-price-fraction"})
+    if whole and fraction:
+        return parse_price(whole.text.strip() + "." + fraction.text.strip())
+    return None
+
+def scrape_feltrinelli(soup):
+    price_tag = soup.find("span", {"class": "price"})
+    if price_tag:
+        return parse_price(price_tag.text)
+    return None
+
+def scrape_other(soup, url):
+    # Controllo prioritario per Discoteca Laziale
+    if "discotecalaziale" in url.lower():
+        price_div = soup.find("div", {"class": "price"})
+        if price_div:
+            val = parse_price(price_div.text)
+            if val is not None:
+                return val
+
+    # Fallback 1: Cerca qualsiasi elemento con classe che contiene 'price'
+    price_elements = soup.find_all(class_=re.compile("price", re.I))
+    for el in price_elements:
+        val = parse_price(el.text)
+        if val is not None:
+            return val
+
+    # Fallback 2: Ricerca testuale del simbolo Euro
+    euro_pattern = re.compile(r'€\s*\d+[.,]\d{2}|\d+[.,]\d{2}\s*€')
+    match = soup.find(string=euro_pattern)
+    if match:
+        found = euro_pattern.search(match).group()
+        return parse_price(found)
+
+    return None
+
+def get_current_price(url, site_name):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        name_lower = site_name.lower()
+        if "amazon" in name_lower:
+            return scrape_amazon(soup)
+        elif "feltrinelli" in name_lower:
+            return scrape_feltrinelli(soup)
+        else:
+            return scrape_other(soup, url)
+    except Exception as e:
+        print(f"Errore scraping {url}: {e}")
         return None
 
+def process_vinyls():
+    response = supabase.table("vinyls").select("*, sources(*)").execute()
+    vinyls = response.data
 
-# --- LOGICA BOT ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ALLOWED_USERS:
-        return
-    await update.message.reply_text("Sistema attivo. Usa /add per monitorare un nuovo vinile.")
-
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ALLOWED_USERS: return
-    await update.message.reply_text("Inserisci l'Artista del vinile:")
-    return ARTIST
-
-async def add_artist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['artist'] = update.message.text
-    await update.message.reply_text("Inserisci il Titolo dell'album:")
-    return TITLE
-
-async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['title'] = update.message.text
-    await update.message.reply_text("Inserisci l'URL di Amazon.it (o scrivi 'no'):")
-    return URL_AMZ
-
-async def add_amz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['url_amz'] = update.message.text
-    await update.message.reply_text("Inserisci l'URL di Feltrinelli.it (o scrivi 'no'):")
-    return URL_FELT
-
-async def add_felt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['url_felt'] = update.message.text
-    await update.message.reply_text("Inserisci l'URL di Discoteca Laziale (o scrivi 'no'):")
-    return URL_DISC
-
-async def add_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url_disc = update.message.text
-    u_data = context.user_data
-    
-    # Salvataggio su DB
-    res = supabase.table("vinyls").insert({"artist": u_data['artist'], "title": u_data['title']}).execute()
-    v_id = res.data[0]["id"]
-    
-    urls = [
-        ("amazon", u_data['url_amz']),
-        ("feltrinelli", u_data['url_felt']),
-        ("discoteca_laziale", url_disc)
-    ]
-    
-    for site, url in urls:
-        if url.lower() != 'no':
-            supabase.table("sources").insert({"vinyl_id": v_id, "site_name": site, "url": url}).execute()
-            
-    await update.message.reply_text("Vinile aggiunto al monitoraggio.")
-    return ConversationHandler.END
-
-async def deactivate_vinyl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    vinyl_id = query.data.split("_")[1]
-    
-    supabase.table("vinyls").update({"is_active": False}).eq("id", vinyl_id).execute()
-    await query.edit_message_text(text=f"{query.message.text}\n\n[STATO: MONITORAGGIO DISATTIVATO]")
-
-async def check_prices_job(context: ContextTypes.DEFAULT_TYPE):
-    # Recupera solo i vinili attivi
-    vinyls = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
-    
-    for vinyl in vinyls.data:
-        best_current_price = float('inf')
-        best_site = ""
-        notifications = []
+    for vinyl in vinyls:
+        artist = vinyl["artist"]
+        title = vinyl["title"]
+        sources = vinyl.get("sources", [])
         
-        for source in vinyl['sources']:
-            new_price = scrape_price(source["url"], source["site_name"])
-            if not new_price: continue
-            
-            # Calcolo statistiche
-            last = source["last_price"] or new_price
-            ath = source["ath_price"] or new_price
-            
-            if new_price < best_current_price:
-                best_current_price = new_price
-                best_site = source["site_name"]
+        if not sources:
+            continue
 
-            # Notifica se il prezzo cala
-            if new_price < last:
-                diff = last - new_price
-                perc = (diff / last) * 100
-                notifications.append({
-                    "site": source["site_name"],
-                    "new": new_price,
-                    "old": last,
-                    "ath": ath,
-                    "diff": diff,
-                    "perc": perc,
-                    "url": source["url"]
+        old_prices = [s["current_price"] for s in sources if s["current_price"] is not None]
+        old_lowest = min(old_prices) if old_prices else None
+        
+        new_prices_data = []
+        
+        for source in sources:
+            new_price = get_current_price(source["url"], source["site_name"])
+            
+            if new_price is not None:
+                new_prices_data.append({
+                    "site_name": source["site_name"],
+                    "url": source["url"],
+                    "price": new_price
                 })
+                
+                supabase.table("sources").update({
+                    "last_price": source["current_price"],
+                    "current_price": new_price,
+                    "updated_at": "now()"
+                }).eq("id", source["id"]).execute()
 
-            # Aggiorna DB
-            upd = {"current_price": new_price, "last_price": last, "updated_at": "now()"}
-            if new_price > ath: upd["ath_price"] = new_price
-            supabase.table("sources").update(upd).eq("id", source["id"]).execute()
+        if not new_prices_data:
+            continue
 
-        # Invia messaggi se ci sono ribassi
-        for n in notifications:
-            keyboard = [[InlineKeyboardButton("Ho comprato / Disattiva", callback_data=f"stop_{vinyl['id']}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        valid_new_prices = [p["price"] for p in new_prices_data]
+        new_lowest = min(valid_new_prices)
+        lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
+
+        # Notifica prima esecuzione (prezzi a null nel DB)
+        if old_lowest is None:
+            msg = f"<b>Nuovo vinile in monitoraggio:</b> {artist} - {title}\n\n"
+            msg += "Prezzi iniziali rilevati:\n"
+            for p in new_prices_data:
+                msg += f"- {p['site_name']}: {p['price']:.2f}€\n"
             
-            msg = (
-                f"OFFERTA: {vinyl['artist']} - {vinyl['title']}\n"
-                f"Store: {n['site']}\n"
-                f"Prezzo: €{n['new']} (Risparmi €{n['diff']:.2f}, -{n['perc']:.1f}%)\n"
-                f"Prezzo precedente: €{n['old']}\n"
-                f"Massimo storico: €{n['ath']}\n"
-                f"Miglior prezzo attuale totale: €{best_current_price} su {best_site}\n"
-                f"Link: {n['url']}"
-            )
-            await context.bot.send_message(chat_id=ALLOWED_USERS[0], text=msg, reply_markup=reply_markup)
+            msg += f"\n<b>Prezzo più basso:</b> {lowest_data['site_name']} a {new_lowest:.2f}€\n"
+            msg += f"<a href='{lowest_data['url']}'>Link diretto</a>"
+            send_telegram_message(msg)
+            continue
+
+        # Notifica ribasso
+        if new_lowest < old_lowest:
+            drop_eur = old_lowest - new_lowest
+            drop_pct = (drop_eur / old_lowest) * 100
+            
+            msg = f"<b>Ribasso rilevato!</b>\n{artist} - {title}\n\n"
+            msg += f"Il prezzo totale più basso è sceso a <b>{new_lowest:.2f}€</b> su {lowest_data['site_name']}.\n"
+            msg += f"Calo di {drop_eur:.2f}€ ({drop_pct:.1f}%).\n\n"
+            msg += f"Precedente minimo: {old_lowest:.2f}€\n"
+            msg += f"<a href='{lowest_data['url']}'>Acquista ora</a>"
+            send_telegram_message(msg)
 
 if __name__ == "__main__":
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add", add_start)],
-        states={
-            ARTIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_artist)],
-            TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_title)],
-            URL_AMZ: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_amz)],
-            URL_FELT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_felt)],
-            URL_DISC: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_finish)],
-        },
-        fallbacks=[],
-    )
-    
-    application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(deactivate_vinyl, pattern="^stop_"))
-    application.job_queue.run_repeating(check_prices_job, interval=3600, first=10)
-    
-    application.run_polling()
+    process_vinyls()
