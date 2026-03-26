@@ -52,11 +52,19 @@ def send_telegram_alert(msg_text, link_url, cover_url=None):
 def parse_price(price_str):
     if not price_str:
         return None
-    match = re.search(r'\d+[.,]\d{2}', str(price_str))
+    
+    # Rimuove simboli e spazi per pulire la stringa
+    s = str(price_str).replace('€', '').replace('EUR', '').strip()
+    # Se c'è sia punto che virgola (es. 1.234,50), togliamo il punto delle migliaia
+    if '.' in s and ',' in s:
+        s = s.replace('.', '')
+        
+    # Cerca numeri con o senza decimali (es. 27,40 | 27.4 | 27)
+    match = re.search(r'\d+[.,]\d+|\d+', s)
     if match:
-        clean_str = match.group().replace(',', '.')
+        val = match.group().replace(',', '.')
         try:
-            return float(clean_str)
+            return float(val)
         except ValueError:
             return None
     return None
@@ -94,33 +102,35 @@ def extract_image(soup):
     return None
 
 def scrape_amazon(soup):
-    # 1. Cerca nel box principale del prezzo (layout moderno Amazon)
-    core_price = soup.find("div", id="corePriceDisplay_desktop_feature_div") or soup.find("div", id="corePrice_desktop")
-    if core_price:
-        offscreen = core_price.find("span", class_="a-offscreen")
-        if offscreen:
-            return parse_price(offscreen.text)
+    # 1. Priorità massima ai campi nascosti del carrello (infallibili se presenti)
+    for hid in ["attach-base-product-price", "twister-plus-price-data-price"]:
+        inp = soup.find("input", id=hid)
+        if inp and inp.get("value"):
+            return parse_price(inp["value"])
             
-    # 2. Cerca nella griglia di selezione formato (specifico per CD/Vinili)
+    # 2. Cerca tutti gli span offscreen (il primo utile è il prezzo)
+    offscreen_spans = soup.find_all("span", class_="a-offscreen")
+    for span in offscreen_spans:
+        val = parse_price(span.text)
+        if val and val > 0:
+            return val
+            
+    # 3. Griglia dei formati (CD/Vinile) usata da Amazon Musica
     swatches = soup.find("div", id="tmmSwatches")
     if swatches:
-        selected = swatches.find("li", class_="selected") or swatches.find("li", class_="swatchElement selected")
+        selected = swatches.find("li", class_=re.compile("selected"))
         if selected:
             price_tag = selected.find("span", class_="a-color-price")
             if price_tag:
                 return parse_price(price_tag.text)
 
-    # 3. Cerca nei classici ID del Buy Box
-    for pid in ["newBuyBoxPrice", "price_inside_buybox", "price", "priceblock_ourprice", "priceblock_dealprice"]:
-        ptag = soup.find("span", id=pid)
-        if ptag:
-            return parse_price(ptag.text)
-
-    # 4. Fallback sulla prima combinazione intero+frazione
-    whole = soup.find("span", {"class": "a-price-whole"})
-    fraction = soup.find("span", {"class": "a-price-fraction"})
+    # 4. Fallback estremo sui componenti intero/frazione
+    whole = soup.find("span", class_="a-price-whole")
+    fraction = soup.find("span", class_="a-price-fraction")
     if whole and fraction:
-        return parse_price(whole.text.strip() + "." + fraction.text.strip())
+        w_text = re.sub(r'[^\d]', '', whole.text)
+        f_text = re.sub(r'[^\d]', '', fraction.text)
+        return parse_price(w_text + "." + f_text)
 
     return None
 
@@ -184,8 +194,8 @@ def get_current_data(url, site_name):
     
     try:
         response = scraper.get(url, headers=headers, timeout=20)
-        
         soup = BeautifulSoup(response.content, "html.parser")
+        
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
@@ -228,7 +238,7 @@ def process_vinyls():
         cover_updated = False
         
         for source in sources:
-            time.sleep(random.uniform(4, 8))
+            time.sleep(random.uniform(3, 6))
             new_price, fetched_image = get_current_data(source["url"], source["site_name"])
             
             if not cover_url and fetched_image and not cover_updated:
