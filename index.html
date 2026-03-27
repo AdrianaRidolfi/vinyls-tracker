@@ -7,18 +7,39 @@
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 20px; }
-        .container { max-width: 800px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 8px; }
-        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+        .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 8px; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 15px; margin-bottom: 20px; }
         h2 { margin: 0; color: #007bff; }
+        
+        .auth-section { background: #252525; padding: 15px; border-radius: 6px; margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
+        .auth-section input { flex-grow: 1; padding: 10px; border-radius: 4px; border: 1px solid #444; background: #121212; color: white; }
+        .auth-section button { padding: 10px 15px; background: #555; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        .auth-section button:hover { background: #666; }
+
         .btn-add { background: #28a745; color: white; text-decoration: none; padding: 10px 15px; border-radius: 4px; font-weight: bold; font-size: 0.9em; }
+        
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
         th { color: #888; font-size: 0.9em; }
         .price { font-weight: bold; color: #28a745; }
-        .btn-action { padding: 6px 10px; margin-right: 5px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 0.8em; }
+        .cover-img { width: 50px; height: 50px; object-fit: cover; border-radius: 4px; }
+        
+        .btn-action { padding: 8px 12px; margin-right: 5px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 0.8em; }
         .btn-details { background: #007bff; color: white; }
         .btn-delete { background: #dc3545; color: white; }
+        
         #loading { text-align: center; color: #888; padding: 20px; }
+
+        /* Stili per il Modal dei Dettagli */
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); }
+        .modal-content { background-color: #1e1e1e; margin: 10% auto; padding: 20px; border: 1px solid #333; width: 80%; max-width: 600px; border-radius: 8px; }
+        .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
+        .close:hover { color: white; }
+        .history-section { margin-bottom: 15px; padding: 10px; background: #252525; border-radius: 4px; }
+        .history-section h3 { margin-top: 0; font-size: 1.1em; }
+        .history-list { list-style-type: none; padding: 0; margin: 0; }
+        .history-list li { padding: 5px 0; border-bottom: 1px dashed #444; font-size: 0.9em; display: flex; justify-content: space-between; }
+        .history-list li:last-child { border-bottom: none; }
     </style>
 </head>
 <body>
@@ -27,15 +48,20 @@
             <h2>I Miei Vinili</h2>
             <a href="add.html" class="btn-add">+ Nuovo Vinile</a>
         </div>
+
+        <div class="auth-section">
+            <input type="password" id="gh_token" placeholder="Inserisci il tuo GitHub Personal Access Token">
+            <button onclick="saveToken()">Salva Token</button>
+        </div>
         
-        <div id="loading">Caricamento dati in corso...</div>
+        <div id="loading">Caricamento catalogo...</div>
         
         <table id="vinyl-table" style="display: none;">
             <thead>
                 <tr>
-                    <th>Artista</th>
-                    <th>Titolo</th>
-                    <th>Prezzo Minimo</th>
+                    <th>Cover</th>
+                    <th>Artista & Titolo</th>
+                    <th>Miglior Prezzo</th>
                     <th>Azioni</th>
                 </tr>
             </thead>
@@ -44,21 +70,46 @@
         </table>
     </div>
 
- <script>
-        // Initialize Supabase client
+    <div id="details-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2 id="modal-title" style="margin-bottom: 20px;">Dettagli Prezzo</h2>
+            <div id="modal-body">
+                Caricamento storico...
+            </div>
+        </div>
+    </div>
+
+    <script>
         const supabaseUrl = 'https://qwziokqukzaxjuyfoxsj.supabase.co';
         const supabaseKey = 'sb_publishable_6cs4sG_e6QJidMI69jyJkA_7pHag3pd';
         
-        // Rinominato in supabaseClient per evitare conflitti con la libreria
-        const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
+        const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey, {
+            auth: { persistSession: false }
+        });
+
+        // Gestione Token
+        document.getElementById('gh_token').value = localStorage.getItem('gh_pat') || '';
+        
+        function saveToken() {
+            const token = document.getElementById('gh_token').value;
+            if (token) {
+                localStorage.setItem('gh_pat', token);
+                alert("Token salvato nel browser.");
+            }
+        }
 
         function formatEur(price) {
             if (price === null || price === undefined) return "N/D";
             return price.toFixed(2).replace('.', ',') + " €";
         }
 
+        function formatDate(isoString) {
+            const date = new Date(isoString);
+            return date.toLocaleDateString('it-IT') + " " + date.toLocaleTimeString('it-IT', {hour: '2-digit', minute:'2-digit'});
+        }
+
         async function loadVinyls() {
-            // Aggiornato il richiamo a supabaseClient
             const { data: vinyls, error } = await supabaseClient
                 .from('vinyls')
                 .select('*, sources(*)');
@@ -68,9 +119,8 @@
             const listObj = document.getElementById('vinyl-list');
 
             if (error) {
-                loadingObj.innerText = "Errore nel caricamento dei dati.";
+                loadingObj.innerText = "Errore nel caricamento dei dati dal database.";
                 loadingObj.style.color = "#dc3545";
-                console.error(error);
                 return;
             }
 
@@ -95,38 +145,95 @@
                     }
                 }
 
+                const coverHtml = vinyl.cover_url 
+                    ? `<img src="${vinyl.cover_url}" class="cover-img">` 
+                    : `<div class="cover-img" style="background:#333; display:flex; align-items:center; justify-content:center; font-size:10px;">No IMG</div>`;
+
                 const tr = document.createElement('tr');
-                
                 tr.innerHTML = `
-                    <td>${vinyl.artist}</td>
-                    <td>${vinyl.title}</td>
+                    <td>${coverHtml}</td>
+                    <td><strong>${vinyl.artist}</strong><br><span style="color:#888; font-size:0.9em;">${vinyl.title}</span></td>
                     <td>
                         <a href="${bestUrl}" target="_blank" class="price" style="text-decoration: none;">
                             ${formatEur(lowestPrice)}
                         </a>
                     </td>
                     <td>
-                        <button class="btn-action btn-details" onclick="viewDetails(${vinyl.id})">Dettagli</button>
+                        <button class="btn-action btn-details" onclick="viewDetails(${vinyl.id}, '${vinyl.artist.replace(/'/g, "\\'")}', '${vinyl.title.replace(/'/g, "\\'")}')">Dettagli</button>
                         <button class="btn-action btn-delete" onclick="deleteVinyl(${vinyl.id})">Elimina</button>
                     </td>
                 `;
-                
                 listObj.appendChild(tr);
             });
         }
 
-        function viewDetails(id) {
-            alert("Funzione dettagli in arrivo per il vinile ID: " + id);
-        }
+        async function viewDetails(vinylId, artist, title) {
+            document.getElementById('modal-title').innerText = `${artist} - ${title}`;
+            document.getElementById('modal-body').innerHTML = "Caricamento storico...";
+            document.getElementById('details-modal').style.display = 'block';
 
-        async function deleteVinyl(id) {
-            const token = localStorage.getItem('gh_pat');
-            if (!token) {
-                alert("GitHub PAT non trovato. Inseriscilo prima in 'Nuovo Vinile'.");
+            // Richiede i siti collegati al vinile e la loro storia dei prezzi
+            const { data: sources, error } = await supabaseClient
+                .from('sources')
+                .select('site_name, url, current_price, price_history(price, recorded_at)')
+                .eq('vinyl_id', vinylId);
+
+            if (error) {
+                document.getElementById('modal-body').innerHTML = '<p style="color:#dc3545;">Errore di caricamento storico.</p>';
                 return;
             }
 
-            if (!confirm("Sei sicura di voler eliminare questo vinile?")) return;
+            if (!sources || sources.length === 0) {
+                document.getElementById('modal-body').innerHTML = '<p>Nessuna sorgente registrata.</p>';
+                return;
+            }
+
+            let html = '';
+            sources.forEach(source => {
+                html += `
+                    <div class="history-section">
+                        <h3><a href="${source.url}" target="_blank" style="color:#007bff; text-decoration:none;">${source.site_name}</a> - Attuale: <span class="price">${formatEur(source.current_price)}</span></h3>
+                `;
+
+                if (source.price_history && source.price_history.length > 0) {
+                    // Ordina i prezzi dal più recente al più vecchio
+                    source.price_history.sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at));
+                    
+                    html += `<ul class="history-list">`;
+                    // Mostra solo gli ultimi 5 rilevamenti per non intasare la vista
+                    source.price_history.slice(0, 5).forEach(ph => {
+                        html += `<li><span>${formatDate(ph.recorded_at)}</span> <strong>${formatEur(ph.price)}</strong></li>`;
+                    });
+                    html += `</ul>`;
+                } else {
+                    html += `<p style="color:#888; font-size:0.9em;">Nessun dato storico archiviato finora.</p>`;
+                }
+                html += `</div>`;
+            });
+
+            document.getElementById('modal-body').innerHTML = html;
+        }
+
+        function closeModal() {
+            document.getElementById('details-modal').style.display = 'none';
+        }
+
+        // Chiude il modal se si clicca fuori dalla finestra
+        window.onclick = function(event) {
+            const modal = document.getElementById('details-modal');
+            if (event.target == modal) {
+                modal.style.display = "none";
+            }
+        }
+
+        async function deleteVinyl(id) {
+            const token = document.getElementById('gh_token').value;
+            if (!token) {
+                alert("Salva prima il tuo PAT nel campo in alto.");
+                return;
+            }
+
+            if (!confirm("Eliminare definitivamente questo vinile e tutto il suo storico?")) return;
 
             const payload = {
                 event_type: 'delete_vinyl',
@@ -144,17 +251,15 @@
                 });
 
                 if (response.ok) {
-                    alert("Comando di eliminazione inviato. Potrebbe volerci qualche secondo prima che scompaia.");
-                    location.reload(); 
+                    alert("Comando inviato ad Actions. Il vinile scomparirà al termine dell'operazione.");
                 } else {
-                    alert("Errore di invio. Verifica il PAT e i permessi.");
+                    alert("Errore. Controlla che il PAT sia corretto e non scaduto.");
                 }
             } catch (error) {
                 alert("Errore di rete.");
             }
         }
 
-        // Run on page load
         loadVinyls();
     </script>
 </body>
