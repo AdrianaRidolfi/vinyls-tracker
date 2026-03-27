@@ -102,48 +102,44 @@ def extract_image(soup):
     return None
 
 def scrape_amazon(soup):
-    # Cerca i contenitori madre dove Amazon piazza fisicamente il carrello o il prezzo
+    price = None
     main_areas = [
         soup.find("div", id="desktop_buybox"),
         soup.find("div", id="corePriceDisplay_desktop_feature_div"),
         soup.find("div", id="corePrice_desktop"),
         soup.find("div", id="price")
     ]
-    
+
     for area in main_areas:
         if not area:
             continue
             
-        # Cerca componenti intero/frazione (es. 25 e 45 per 25,45)
         whole = area.find("span", class_="a-price-whole")
         fraction = area.find("span", class_="a-price-fraction")
         if whole and fraction:
             w_text = re.sub(r'[^\d]', '', whole.text)
             f_text = re.sub(r'[^\d]', '', fraction.text)
-            val = parse_price(w_text + "." + f_text)
-            if val:
-                return val
+            price = parse_price(w_text + "." + f_text)
+            if price:
+                break
                 
-        # Cerca il testo offscreen generico del prezzo se frazione non esiste
         offscreen = area.find("span", class_="a-offscreen")
         if offscreen:
             val = parse_price(offscreen.text)
             if val:
-                return val
+                price = val
+                break
 
-    # 2. Alternativa: Cerca la griglia dei formati (LP/CD) usata molto nei vinili
-    swatches = soup.find("div", id="tmmSwatches")
-    if swatches:
-        selected = swatches.find("li", class_=re.compile("selected"))
-        if selected:
-            price_tag = selected.find("span", class_="a-color-price") or selected.find("span", class_="a-price")
-            if price_tag:
-                val = parse_price(price_tag.text)
-                if val:
-                    return val
+    if not price:
+        swatches = soup.find("div", id="tmmSwatches")
+        if swatches:
+            selected = swatches.find("li", class_=re.compile("selected"))
+            if selected:
+                price_tag = selected.find("span", class_="a-color-price") or selected.find("span", class_="a-price")
+                if price_tag:
+                    price = parse_price(price_tag.text)
 
-    # Se fallisce tutto, restituisce None. Niente più fallback sballati.
-    return None
+    return price
 
 def scrape_feltrinelli(soup):
     json_price = extract_json_ld_price(soup)
@@ -204,64 +200,55 @@ def get_current_data(url, site_name):
         "Referer": "https://www.google.com/"
     }
     
+    name_lower = site_name.lower()
+    
     try:
-        response = scraper.get(url, headers=headers, timeout=20)
+        # Iniezione Header e Cookie specifici per Amazon per aggirare il check geografico
+        if "amazon" in name_lower:
+            amazon_headers = headers.copy()
+            amazon_headers["CloudFront-Viewer-Country"] = "IT"
+            amazon_headers["X-Forwarded-For"] = "151.38.0.1" 
+            amazon_headers["Referer"] = "https://www.amazon.it/"
+            
+            amazon_cookies = {
+                "i18n-prefs": "EUR",
+                "lc-acbit": "it_IT",
+                "sp-cdn": "L5Z9:IT",
+                "countryCode": "IT",
+            }
+            response = scraper.get(url, headers=amazon_headers, cookies=amazon_cookies, timeout=20)
+        else:
+            response = scraper.get(url, headers=headers, timeout=20)
+            
         soup = BeautifulSoup(response.content, "html.parser")
         
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
-        if "amazon" in site_name.lower() and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
-            print("!!! BLOCCATO DA AMAZON CAPTCHA !!! Salto la lettura.")
+        if "amazon" in name_lower and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
+            print("BLOCCATO DA AMAZON CAPTCHA. Salto la lettura.")
             return None, None
             
         image_url = extract_image(soup)
         price = None
         
-        name_lower = site_name.lower()
         if "amazon" in name_lower:
             price = scrape_amazon(soup)
-            
-            print(f"\n--- DEBUG DOM AMAZON PER {url} ---")
-            print(f"Prezzo calcolato dallo script: {price}")
-            
-            if soup.head:
-                soup.head.decompose()
-            for tag in soup(["script", "style", "meta", "noscript", "svg"]):
-                tag.decompose()
-            
-            center = soup.find("div", id="centerCol")
-            buybox = soup.find("div", id="desktop_buybox")
-            
-            if center:
-                print("\n--- INIZIO CENTER COL ---")
-                print(center.prettify()[:4000])
-            if buybox:
-                print("\n--- INIZIO BUYBOX ---")
-                print(buybox.prettify()[:4000])
-                
-            if not center and not buybox:
-                print("\n--- INIZIO BODY ---")
-                if soup.body:
-                    print(soup.body.prettify()[:5000])
-            
-            print("--- FINE DEBUG DOM ---\n")
-            
         elif "feltrinelli" in name_lower:
             price = scrape_feltrinelli(soup)
         else:
             price = scrape_other(soup, url)
             
-        if price is None and "amazon" not in name_lower:
+        if price is None:
             print(f"Prezzo non trovato per {site_name}.")
-        elif price is not None and "amazon" not in name_lower:
+        else:
             print(f"Prezzo rilevato: {price}")
             
         return price, image_url
     except Exception as e:
-        print(f"Errore scraping {site_name} - {url}: {e}")
+        print(f"Errore scraping {site_name}: {e}")
         return None, None
-        
+
 def process_vinyls():
     response = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
     vinyls = response.data
@@ -283,7 +270,7 @@ def process_vinyls():
         cover_updated = False
         
         for source in sources:
-            time.sleep(random.uniform(4, 8)) # Pausa allungata per ridurre sospetti
+            time.sleep(random.uniform(4, 8))
             
             new_price, fetched_image = get_current_data(source["url"], source["site_name"])
             
