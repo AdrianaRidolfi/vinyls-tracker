@@ -1,0 +1,35 @@
+name: Toggle Tracking
+
+on:
+  repository_dispatch:
+    types: [toggle_tracking]
+
+jobs:
+  update_status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install supabase
+
+      - name: Update is_active
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          python -c "
+          import os, json
+          from supabase import create_client
+
+          payload = json.loads(os.environ['PAYLOAD'])
+          url = os.environ.get('SUPABASE_URL')
+          key = os.environ.get('SUPABASE_KEY')
+          v_id = payload.get('id')
+          new_status = payload.get('is_active')
+
+          if url and key and v_id:
+              supabase = create_client(url, key)
+              supabase.table('vinyls').update({'is_active': new_status}).eq('id', v_id).execute()
+          "
