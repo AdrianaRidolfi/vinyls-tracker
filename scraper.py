@@ -104,42 +104,33 @@ def extract_image(soup):
     return None
     
 def scrape_amazon(soup):
-    # Tentativo 1: Cerca il blocco del prezzo visibile a schermo (IVA reale già inclusa)
-    core_price = soup.find("div", id=re.compile("corePrice"))
-    if core_price:
-        offscreen = core_price.find("span", class_="a-offscreen")
-        if offscreen:
-            val = parse_price(offscreen.text)
-            if val: 
+    # 1. Selettori CSS estremamente specifici per il box del prezzo principale
+    selectors = [
+        '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
+        '#corePrice_desktop .a-price .a-offscreen',
+        '#buyNewSection .a-price .a-offscreen',
+        '#tmmSwatches .selected .a-color-price'
+    ]
+
+    for sel in selectors:
+        elem = soup.select_one(sel)
+        if elem and elem.text:
+            val = parse_price(elem.text)
+            if val:
                 return val
 
-    # Tentativo 2: Cerca i componenti separati (intero e frazione)
-    whole = soup.find("span", class_="a-price-whole")
-    fraction = soup.find("span", class_="a-price-fraction")
-    if whole and fraction:
-        w_text = re.sub(r'[^\d]', '', whole.text)
-        f_text = re.sub(r'[^\d]', '', fraction.text)
-        return parse_price(w_text + "." + f_text)
-
-    # Tentativo 3: Selezionatore del formato Vinile
-    swatches = soup.find("div", id="tmmSwatches")
-    if swatches:
-        selected = swatches.find("li", class_=re.compile("selected"))
-        if selected:
-            price_tag = selected.find("span", class_="a-color-price")
-            if price_tag:
-                return parse_price(price_tag.text)
-
-    # Tentativo 4 (Fallback): Usa i campi nascosti e aggiunge il 22% di IVA italiana
-    for hid in ["attach-base-product-price", "twister-plus-price-data-price"]:
-        inp = soup.find("input", id=hid)
-        if inp and inp.get("value"):
-            base_val = parse_price(inp["value"])
-            if base_val:
-                return round(base_val * 1.22, 2)
+    # 2. Fallback sui componenti separati, ma isolati SOLO alla colonna centrale
+    center_col = soup.find("div", id="centerCol")
+    if center_col:
+        whole = center_col.find("span", class_="a-price-whole")
+        fraction = center_col.find("span", class_="a-price-fraction")
+        if whole and fraction:
+            w_text = re.sub(r'[^\d]', '', whole.text)
+            f_text = re.sub(r'[^\d]', '', fraction.text)
+            return parse_price(w_text + "." + f_text)
 
     return None
-
+    
 def scrape_feltrinelli(soup):
     json_price = extract_json_ld_price(soup)
     if json_price:
@@ -195,7 +186,8 @@ def get_current_data(url, site_name):
     headers = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.google.com/"
+        "Cookie": "i18n-prefs=EUR; lc-acgit=it_IT;",
+        "Referer": "https://www.amazon.it/"
     }
     
     try:
