@@ -192,15 +192,10 @@ def get_current_data(url, site_name):
         'desktop': True
     })
     
-    # Header rafforzati per sembrare un vero browser italiano
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Upgrade-Insecure-Requests": "1",
         "Referer": "https://www.google.com/"
     }
     
@@ -211,32 +206,40 @@ def get_current_data(url, site_name):
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
-        # BLOCCO CAPTCHA AMAZON
-        if "amazon" in site_name.lower() and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
-            print("!!! BLOCCATO DA AMAZON CAPTCHA !!! Salto la lettura.")
-            return None, None
-            
         image_url = extract_image(soup)
         price = None
         
         name_lower = site_name.lower()
         if "amazon" in name_lower:
             price = scrape_amazon(soup)
+            
+            # BLOCCO DEBUG DOM
+            if price is None:
+                print(f"\n!!! PREZZO NON TROVATO SU AMAZON. STAMPO IL DOM PER: {url} !!!")
+                # Rimuoviamo tag non visivi per non intasare i log
+                for tag in soup(["script", "style", "meta", "noscript", "svg"]):
+                    tag.decompose()
+                
+                # Stampiamo i primi 10000 caratteri dell'HTML pulito
+                print("--- INIZIO DOM ---")
+                print(soup.prettify()[:10000])
+                print("--- FINE DOM ---\n")
+                
         elif "feltrinelli" in name_lower:
             price = scrape_feltrinelli(soup)
         else:
             price = scrape_other(soup, url)
             
-        if price is None:
+        if price is None and "amazon" not in name_lower:
             print(f"Prezzo non trovato per {site_name}.")
-        else:
+        elif price is not None:
             print(f"Prezzo rilevato: {price}")
             
         return price, image_url
     except Exception as e:
         print(f"Errore scraping {site_name} - {url}: {e}")
         return None, None
-
+        
 def process_vinyls():
     response = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
     vinyls = response.data
