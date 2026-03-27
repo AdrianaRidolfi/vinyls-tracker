@@ -101,19 +101,26 @@ def extract_image(soup):
     if amz_img and amz_img.get("src"):
         return amz_img["src"]
     return None
-
+    
 def scrape_amazon(soup):
-    for hid in ["attach-base-product-price", "twister-plus-price-data-price"]:
-        inp = soup.find("input", id=hid)
-        if inp and inp.get("value"):
-            return parse_price(inp["value"])
-            
-    offscreen_spans = soup.find_all("span", class_="a-offscreen")
-    for span in offscreen_spans:
-        val = parse_price(span.text)
-        if val and val > 0:
-            return val
-            
+    # Tentativo 1: Cerca il blocco del prezzo visibile a schermo (IVA reale già inclusa)
+    core_price = soup.find("div", id=re.compile("corePrice"))
+    if core_price:
+        offscreen = core_price.find("span", class_="a-offscreen")
+        if offscreen:
+            val = parse_price(offscreen.text)
+            if val: 
+                return val
+
+    # Tentativo 2: Cerca i componenti separati (intero e frazione)
+    whole = soup.find("span", class_="a-price-whole")
+    fraction = soup.find("span", class_="a-price-fraction")
+    if whole and fraction:
+        w_text = re.sub(r'[^\d]', '', whole.text)
+        f_text = re.sub(r'[^\d]', '', fraction.text)
+        return parse_price(w_text + "." + f_text)
+
+    # Tentativo 3: Selezionatore del formato Vinile
     swatches = soup.find("div", id="tmmSwatches")
     if swatches:
         selected = swatches.find("li", class_=re.compile("selected"))
@@ -122,12 +129,13 @@ def scrape_amazon(soup):
             if price_tag:
                 return parse_price(price_tag.text)
 
-    whole = soup.find("span", class_="a-price-whole")
-    fraction = soup.find("span", class_="a-price-fraction")
-    if whole and fraction:
-        w_text = re.sub(r'[^\d]', '', whole.text)
-        f_text = re.sub(r'[^\d]', '', fraction.text)
-        return parse_price(w_text + "." + f_text)
+    # Tentativo 4 (Fallback): Usa i campi nascosti e aggiunge il 22% di IVA italiana
+    for hid in ["attach-base-product-price", "twister-plus-price-data-price"]:
+        inp = soup.find("input", id=hid)
+        if inp and inp.get("value"):
+            base_val = parse_price(inp["value"])
+            if base_val:
+                return round(base_val * 1.22, 2)
 
     return None
 
