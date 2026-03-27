@@ -44,11 +44,13 @@
         </table>
     </div>
 
-    <script>
+ <script>
         // Initialize Supabase client
         const supabaseUrl = 'https://qwziokqukzaxjuyfoxsj.supabase.co';
         const supabaseKey = 'sb_publishable_6cs4sG_e6QJidMI69jyJkA_7pHag3pd';
-        const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
+        
+        // Rinominato in supabaseClient per evitare conflitti con la libreria
+        const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
 
         function formatEur(price) {
             if (price === null || price === undefined) return "N/D";
@@ -56,7 +58,8 @@
         }
 
         async function loadVinyls() {
-            const { data: vinyls, error } = await supabase
+            // Aggiornato il richiamo a supabaseClient
+            const { data: vinyls, error } = await supabaseClient
                 .from('vinyls')
                 .select('*, sources(*)');
 
@@ -80,7 +83,6 @@
             tableObj.style.display = 'table';
 
             vinyls.forEach(vinyl => {
-                // Find lowest current price among all sources
                 let lowestPrice = null;
                 let bestUrl = "#";
 
@@ -117,7 +119,7 @@
             alert("Funzione dettagli in arrivo per il vinile ID: " + id);
         }
 
-     async function deleteVinyl(id) {
+        async function deleteVinyl(id) {
             const token = localStorage.getItem('gh_pat');
             if (!token) {
                 alert("GitHub PAT non trovato. Inseriscilo prima in 'Nuovo Vinile'.");
