@@ -211,7 +211,6 @@ def get_current_data(url, site_name):
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
-        # Blocco CAPTCHA di sicurezza
         if "amazon" in site_name.lower() and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
             print("!!! BLOCCATO DA AMAZON CAPTCHA !!! Salto la lettura.")
             return None, None
@@ -222,14 +221,40 @@ def get_current_data(url, site_name):
         name_lower = site_name.lower()
         if "amazon" in name_lower:
             price = scrape_amazon(soup)
+            
+            print(f"\n--- DEBUG DOM AMAZON PER {url} ---")
+            print(f"Prezzo calcolato dallo script: {price}")
+            
+            if soup.head:
+                soup.head.decompose()
+            for tag in soup(["script", "style", "meta", "noscript", "svg"]):
+                tag.decompose()
+            
+            center = soup.find("div", id="centerCol")
+            buybox = soup.find("div", id="desktop_buybox")
+            
+            if center:
+                print("\n--- INIZIO CENTER COL ---")
+                print(center.prettify()[:4000])
+            if buybox:
+                print("\n--- INIZIO BUYBOX ---")
+                print(buybox.prettify()[:4000])
+                
+            if not center and not buybox:
+                print("\n--- INIZIO BODY ---")
+                if soup.body:
+                    print(soup.body.prettify()[:5000])
+            
+            print("--- FINE DEBUG DOM ---\n")
+            
         elif "feltrinelli" in name_lower:
             price = scrape_feltrinelli(soup)
         else:
             price = scrape_other(soup, url)
             
-        if price is None:
+        if price is None and "amazon" not in name_lower:
             print(f"Prezzo non trovato per {site_name}.")
-        else:
+        elif price is not None and "amazon" not in name_lower:
             print(f"Prezzo rilevato: {price}")
             
         return price, image_url
