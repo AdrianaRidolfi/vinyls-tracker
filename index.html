@@ -27,19 +27,25 @@
         .btn-action { padding: 8px 12px; margin-right: 5px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 0.8em; }
         .btn-details { background: #007bff; color: white; }
         .btn-delete { background: #dc3545; color: white; }
+        .btn-secondary { background: #555; color: white; }
         
         #loading { text-align: center; color: #888; padding: 20px; }
 
-        /* Stili per il Modal dei Dettagli */
+        /* Modals */
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); }
-        .modal-content { background-color: #1e1e1e; margin: 10% auto; padding: 20px; border: 1px solid #333; width: 80%; max-width: 600px; border-radius: 8px; }
+        .modal-content { background-color: #1e1e1e; margin: 10% auto; padding: 20px; border: 1px solid #333; width: 80%; border-radius: 8px; }
+        .modal-content.large { max-width: 600px; }
+        .modal-content.small { max-width: 400px; text-align: center; }
         .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; cursor: pointer; }
         .close:hover { color: white; }
+        
         .history-section { margin-bottom: 15px; padding: 10px; background: #252525; border-radius: 4px; }
         .history-section h3 { margin-top: 0; font-size: 1.1em; }
         .history-list { list-style-type: none; padding: 0; margin: 0; }
         .history-list li { padding: 5px 0; border-bottom: 1px dashed #444; font-size: 0.9em; display: flex; justify-content: space-between; }
         .history-list li:last-child { border-bottom: none; }
+        
+        .modal-buttons { margin-top: 20px; display: flex; justify-content: center; gap: 10px; }
     </style>
 </head>
 <body>
@@ -66,16 +72,37 @@
                 </tr>
             </thead>
             <tbody id="vinyl-list">
-                </tbody>
+            </tbody>
         </table>
     </div>
 
     <div id="details-modal" class="modal">
-        <div class="modal-content">
-            <span class="close" onclick="closeModal()">&times;</span>
+        <div class="modal-content large">
+            <span class="close" onclick="closeModal('details-modal')">&times;</span>
             <h2 id="modal-title" style="margin-bottom: 20px;">Dettagli Prezzo</h2>
             <div id="modal-body">
                 Caricamento storico...
+            </div>
+        </div>
+    </div>
+
+    <div id="alert-modal" class="modal">
+        <div class="modal-content small">
+            <h3 id="alert-title" style="margin-top:0;">Avviso</h3>
+            <p id="alert-message"></p>
+            <div class="modal-buttons">
+                <button class="btn-action btn-details" onclick="closeModal('alert-modal')" style="padding: 10px 20px;">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="confirm-modal" class="modal">
+        <div class="modal-content small">
+            <h3 style="margin-top:0; color: #dc3545;">Attenzione</h3>
+            <p id="confirm-message"></p>
+            <div class="modal-buttons">
+                <button class="btn-action btn-secondary" onclick="closeModal('confirm-modal')" style="padding: 10px 20px;">Annulla</button>
+                <button class="btn-action btn-delete" id="confirm-yes-btn" style="padding: 10px 20px;">Elimina</button>
             </div>
         </div>
     </div>
@@ -88,14 +115,43 @@
             auth: { persistSession: false }
         });
 
-        // Gestione Token
         document.getElementById('gh_token').value = localStorage.getItem('gh_pat') || '';
         
+        // Funzioni per gestire le modali personalizzate
+        function customAlert(title, message) {
+            document.getElementById('alert-title').innerText = title;
+            document.getElementById('alert-message').innerText = message;
+            document.getElementById('alert-modal').style.display = 'block';
+        }
+
+        function customConfirm(message, onConfirm) {
+            document.getElementById('confirm-message').innerText = message;
+            document.getElementById('confirm-modal').style.display = 'block';
+            
+            const yesBtn = document.getElementById('confirm-yes-btn');
+            // Rimuove eventuali listener precedenti
+            yesBtn.replaceWith(yesBtn.cloneNode(true));
+            document.getElementById('confirm-yes-btn').addEventListener('click', function() {
+                closeModal('confirm-modal');
+                onConfirm();
+            });
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+
+        window.onclick = function(event) {
+            if (event.target.classList.contains('modal')) {
+                event.target.style.display = "none";
+            }
+        }
+
         function saveToken() {
             const token = document.getElementById('gh_token').value;
             if (token) {
                 localStorage.setItem('gh_pat', token);
-                alert("Token salvato nel browser.");
+                customAlert("Successo", "Token salvato nel browser.");
             }
         }
 
@@ -160,7 +216,7 @@
                     </td>
                     <td>
                         <button class="btn-action btn-details" onclick="viewDetails(${vinyl.id}, '${vinyl.artist.replace(/'/g, "\\'")}', '${vinyl.title.replace(/'/g, "\\'")}')">Dettagli</button>
-                        <button class="btn-action btn-delete" onclick="deleteVinyl(${vinyl.id})">Elimina</button>
+                        <button class="btn-action btn-delete" onclick="requestDelete(${vinyl.id})">Elimina</button>
                     </td>
                 `;
                 listObj.appendChild(tr);
@@ -172,7 +228,6 @@
             document.getElementById('modal-body').innerHTML = "Caricamento storico...";
             document.getElementById('details-modal').style.display = 'block';
 
-            // Richiede i siti collegati al vinile e la loro storia dei prezzi
             const { data: sources, error } = await supabaseClient
                 .from('sources')
                 .select('site_name, url, current_price, price_history(price, recorded_at)')
@@ -196,11 +251,9 @@
                 `;
 
                 if (source.price_history && source.price_history.length > 0) {
-                    // Ordina i prezzi dal più recente al più vecchio
                     source.price_history.sort((a, b) => new Date(b.recorded_at) - new Date(a.recorded_at));
                     
                     html += `<ul class="history-list">`;
-                    // Mostra solo gli ultimi 5 rilevamenti per non intasare la vista
                     source.price_history.slice(0, 5).forEach(ph => {
                         html += `<li><span>${formatDate(ph.recorded_at)}</span> <strong>${formatEur(ph.price)}</strong></li>`;
                     });
@@ -214,27 +267,19 @@
             document.getElementById('modal-body').innerHTML = html;
         }
 
-        function closeModal() {
-            document.getElementById('details-modal').style.display = 'none';
-        }
-
-        // Chiude il modal se si clicca fuori dalla finestra
-        window.onclick = function(event) {
-            const modal = document.getElementById('details-modal');
-            if (event.target == modal) {
-                modal.style.display = "none";
-            }
-        }
-
-        async function deleteVinyl(id) {
+        function requestDelete(id) {
             const token = document.getElementById('gh_token').value;
             if (!token) {
-                alert("Salva prima il tuo PAT nel campo in alto.");
+                customAlert("Errore", "Salva prima il tuo PAT nel campo in alto.");
                 return;
             }
 
-            if (!confirm("Eliminare definitivamente questo vinile e tutto il suo storico?")) return;
+            customConfirm("Eliminare definitivamente questo vinile e tutto il suo storico?", function() {
+                executeDelete(id, token);
+            });
+        }
 
+        async function executeDelete(id, token) {
             const payload = {
                 event_type: 'delete_vinyl',
                 client_payload: { id: id }
@@ -251,12 +296,12 @@
                 });
 
                 if (response.ok) {
-                    alert("Comando inviato ad Actions. Il vinile scomparirà al termine dell'operazione.");
+                    customAlert("Successo", "Comando inviato ad Actions. Il vinile scomparirà al termine dell'operazione.");
                 } else {
-                    alert("Errore. Controlla che il PAT sia corretto e non scaduto.");
+                    customAlert("Errore", "Controlla che il PAT sia corretto e non scaduto.");
                 }
             } catch (error) {
-                alert("Errore di rete.");
+                customAlert("Errore", "Errore di rete.");
             }
         }
 
