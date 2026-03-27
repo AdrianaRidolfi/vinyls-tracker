@@ -102,42 +102,47 @@ def extract_image(soup):
     return None
 
 def scrape_amazon(soup):
-    # Isola la ricerca ESCLUSIVAMENTE alla colonna centrale dell'acquisto
-    center_col = soup.find("div", id="centerCol")
-    if not center_col:
-        return None
-
-    # 1. Cerca il tag a-offscreen dentro i blocchi di prezzo principali
-    price_spans = center_col.find_all("span", class_="a-price")
-    for p in price_spans:
-        offscreen = p.find("span", class_="a-offscreen")
+    # Cerca i contenitori madre dove Amazon piazza fisicamente il carrello o il prezzo
+    main_areas = [
+        soup.find("div", id="desktop_buybox"),
+        soup.find("div", id="corePriceDisplay_desktop_feature_div"),
+        soup.find("div", id="corePrice_desktop"),
+        soup.find("div", id="price")
+    ]
+    
+    for area in main_areas:
+        if not area:
+            continue
+            
+        # Cerca componenti intero/frazione (es. 25 e 45 per 25,45)
+        whole = area.find("span", class_="a-price-whole")
+        fraction = area.find("span", class_="a-price-fraction")
+        if whole and fraction:
+            w_text = re.sub(r'[^\d]', '', whole.text)
+            f_text = re.sub(r'[^\d]', '', fraction.text)
+            val = parse_price(w_text + "." + f_text)
+            if val:
+                return val
+                
+        # Cerca il testo offscreen generico del prezzo se frazione non esiste
+        offscreen = area.find("span", class_="a-offscreen")
         if offscreen:
             val = parse_price(offscreen.text)
             if val:
                 return val
 
-    # 2. Cerca intero e decimale separati (es. 25,45)
-    whole = center_col.find("span", class_="a-price-whole")
-    fraction = center_col.find("span", class_="a-price-fraction")
-    if whole and fraction:
-        w_text = re.sub(r'[^\d]', '', whole.text)
-        f_text = re.sub(r'[^\d]', '', fraction.text)
-        val = parse_price(w_text + "." + f_text)
-        if val:
-            return val
-
-    # 3. Formato selezionato (vinile)
-    swatches = center_col.find("div", id="tmmSwatches")
+    # 2. Alternativa: Cerca la griglia dei formati (LP/CD) usata molto nei vinili
+    swatches = soup.find("div", id="tmmSwatches")
     if swatches:
         selected = swatches.find("li", class_=re.compile("selected"))
         if selected:
-            price_tag = selected.find("span", class_="a-color-price")
+            price_tag = selected.find("span", class_="a-color-price") or selected.find("span", class_="a-price")
             if price_tag:
                 val = parse_price(price_tag.text)
                 if val:
                     return val
 
-    # NESSUN FALLBACK. Se non c'è qui, restituiamo None.
+    # Se fallisce tutto, restituisce None. Niente più fallback sballati.
     return None
 
 def scrape_feltrinelli(soup):
@@ -206,33 +211,25 @@ def get_current_data(url, site_name):
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
+        # Blocco CAPTCHA di sicurezza
+        if "amazon" in site_name.lower() and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
+            print("!!! BLOCCATO DA AMAZON CAPTCHA !!! Salto la lettura.")
+            return None, None
+            
         image_url = extract_image(soup)
         price = None
         
         name_lower = site_name.lower()
         if "amazon" in name_lower:
             price = scrape_amazon(soup)
-            
-            # BLOCCO DEBUG DOM
-            if price is None:
-                print(f"\n!!! PREZZO NON TROVATO SU AMAZON. STAMPO IL DOM PER: {url} !!!")
-                # Rimuoviamo tag non visivi per non intasare i log
-                for tag in soup(["script", "style", "meta", "noscript", "svg"]):
-                    tag.decompose()
-                
-                # Stampiamo i primi 10000 caratteri dell'HTML pulito
-                print("--- INIZIO DOM ---")
-                print(soup.prettify()[:10000])
-                print("--- FINE DOM ---\n")
-                
         elif "feltrinelli" in name_lower:
             price = scrape_feltrinelli(soup)
         else:
             price = scrape_other(soup, url)
             
-        if price is None and "amazon" not in name_lower:
+        if price is None:
             print(f"Prezzo non trovato per {site_name}.")
-        elif price is not None:
+        else:
             print(f"Prezzo rilevato: {price}")
             
         return price, image_url
