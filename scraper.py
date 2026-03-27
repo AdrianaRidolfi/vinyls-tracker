@@ -110,6 +110,7 @@ def scrape_amazon(soup):
         soup.find("div", id="price")
     ]
 
+    # Trova il prezzo base esposto
     for area in main_areas:
         if not area:
             continue
@@ -130,6 +131,7 @@ def scrape_amazon(soup):
                 price = val
                 break
 
+    # Fallback swatches
     if not price:
         swatches = soup.find("div", id="tmmSwatches")
         if swatches:
@@ -138,6 +140,16 @@ def scrape_amazon(soup):
                 price_tag = selected.find("span", class_="a-color-price") or selected.find("span", class_="a-price")
                 if price_tag:
                     price = parse_price(price_tag.text)
+
+    if not price:
+        return None
+
+    # CORREZIONE IVA INTELLIGENTE BASATA SULLA DESTINAZIONE
+    location = soup.find(id="glow-ingress-line2")
+    if location:
+        loc_text = location.text.strip().lower()
+        if "stati uniti" in loc_text or "united states" in loc_text or "us" in loc_text:
+            price = round(price * 1.22, 2)
 
     return price
 
@@ -200,38 +212,21 @@ def get_current_data(url, site_name):
         "Referer": "https://www.google.com/"
     }
     
-    name_lower = site_name.lower()
-    
     try:
-        # Iniezione Header e Cookie specifici per Amazon per aggirare il check geografico
-        if "amazon" in name_lower:
-            amazon_headers = headers.copy()
-            amazon_headers["CloudFront-Viewer-Country"] = "IT"
-            amazon_headers["X-Forwarded-For"] = "151.38.0.1" 
-            amazon_headers["Referer"] = "https://www.amazon.it/"
-            
-            amazon_cookies = {
-                "i18n-prefs": "EUR",
-                "lc-acbit": "it_IT",
-                "sp-cdn": "L5Z9:IT",
-                "countryCode": "IT",
-            }
-            response = scraper.get(url, headers=amazon_headers, cookies=amazon_cookies, timeout=20)
-        else:
-            response = scraper.get(url, headers=headers, timeout=20)
-            
+        response = scraper.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(response.content, "html.parser")
         
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
-        if "amazon" in name_lower and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
+        if "amazon" in site_name.lower() and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
             print("BLOCCATO DA AMAZON CAPTCHA. Salto la lettura.")
             return None, None
             
         image_url = extract_image(soup)
         price = None
         
+        name_lower = site_name.lower()
         if "amazon" in name_lower:
             price = scrape_amazon(soup)
         elif "feltrinelli" in name_lower:
