@@ -15,13 +15,21 @@ CHAT_ID = os.environ.get("CHAT_ID")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def format_eur(price_float):
+    if price_float is None:
+        return "N/D"
     return f"{price_float:.2f}".replace(".", ",") + " EUR"
 
-def send_telegram_alert(msg_text, link_url, cover_url=None):
+def send_telegram_alert(msg_text, link_url, vinyl_id, cover_url=None):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
+    # Aggiornati i bottoni in vista dell'interattività Webhook
     reply_markup = {
-        "inline_keyboard": [[{"text": "Vedi Offerta", "url": link_url}]]
+        "inline_keyboard": [
+            [
+                {"text": "Apri Link", "url": link_url},
+                {"text": "Statistiche", "callback_data": f"stats_{vinyl_id}"}
+            ]
+        ]
     }
     
     if cover_url:
@@ -52,14 +60,9 @@ def send_telegram_alert(msg_text, link_url, cover_url=None):
 def parse_price(price_str):
     if not price_str:
         return None
-    
-    # Rimuove simboli e spazi per pulire la stringa
     s = str(price_str).replace('€', '').replace('EUR', '').strip()
-    # Se c'è sia punto che virgola (es. 1.234,50), togliamo il punto delle migliaia
     if '.' in s and ',' in s:
         s = s.replace('.', '')
-        
-    # Cerca numeri con o senza decimali (es. 27,40 | 27.4 | 27)
     match = re.search(r'\d+[.,]\d+|\d+', s)
     if match:
         val = match.group().replace(',', '.')
@@ -94,28 +97,23 @@ def extract_image(soup):
     meta_og = soup.find("meta", property="og:image")
     if meta_og and meta_og.get("content"):
         return meta_og["content"]
-    
     amz_img = soup.find("img", id="landingImage")
     if amz_img and amz_img.get("src"):
         return amz_img["src"]
-        
     return None
 
 def scrape_amazon(soup):
-    # 1. Priorità massima ai campi nascosti del carrello (infallibili se presenti)
     for hid in ["attach-base-product-price", "twister-plus-price-data-price"]:
         inp = soup.find("input", id=hid)
         if inp and inp.get("value"):
             return parse_price(inp["value"])
             
-    # 2. Cerca tutti gli span offscreen (il primo utile è il prezzo)
     offscreen_spans = soup.find_all("span", class_="a-offscreen")
     for span in offscreen_spans:
         val = parse_price(span.text)
         if val and val > 0:
             return val
             
-    # 3. Griglia dei formati (CD/Vinile) usata da Amazon Musica
     swatches = soup.find("div", id="tmmSwatches")
     if swatches:
         selected = swatches.find("li", class_=re.compile("selected"))
@@ -124,7 +122,6 @@ def scrape_amazon(soup):
             if price_tag:
                 return parse_price(price_tag.text)
 
-    # 4. Fallback estremo sui componenti intero/frazione
     whole = soup.find("span", class_="a-price-whole")
     fraction = soup.find("span", class_="a-price-fraction")
     if whole and fraction:
@@ -219,7 +216,8 @@ def get_current_data(url, site_name):
         return None, None
 
 def process_vinyls():
-    response = supabase.table("vinyls").select("*, sources(*)").execute()
+    # Filtra solo i vinili attivi per lo scraping
+    response = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
     vinyls = response.data
 
     for vinyl in vinyls:
@@ -227,6 +225,7 @@ def process_vinyls():
         title = vinyl["title"]
         cover_url = vinyl.get("cover_url")
         sources = vinyl.get("sources", [])
+        vinyl_id = vinyl["id"]
         
         if not sources:
             continue
@@ -239,13 +238,17 @@ def process_vinyls():
         
         for source in sources:
             time.sleep(random.uniform(3, 6))
+            
+            # Recupero dati attuali
             new_price, fetched_image = get_current_data(source["url"], source["site_name"])
             
+            # Aggiornamento cover se mancante
             if not cover_url and fetched_image and not cover_updated:
-                supabase.table("vinyls").update({"cover_url": fetched_image}).eq("id", vinyl["id"]).execute()
+                supabase.table("vinyls").update({"cover_url": fetched_image}).eq("id", vinyl_id).execute()
                 cover_url = fetched_image
                 cover_updated = True
             
+            # Gestione storico e aggiornamento DB se il prezzo è valido
             if new_price is not None:
                 new_prices_data.append({
                     "site_name": source["site_name"],
@@ -253,11 +256,29 @@ def process_vinyls():
                     "price": new_price
                 })
                 
-                supabase.table("sources").update({
-                    "last_price": source["current_price"],
+                source_id = source["id"]
+                current_db_price = source.get("current_price")
+                current_ath = source.get("ath_price")
+                
+                update_payload = {
+                    "last_price": current_db_price,
                     "current_price": new_price,
                     "updated_at": "now()"
-                }).eq("id", source["id"]).execute()
+                }
+                
+                # Gestione All-Time High/Low
+                if current_ath is None or current_ath == 0 or new_price < current_ath:
+                    update_payload["ath_price"] = new_price
+                
+                # Aggiorna la tabella sources
+                supabase.table("sources").update(update_payload).eq("id", source_id).execute()
+                
+                # Scrivi nello storico se il prezzo è cambiato o non c'era
+                if current_db_price != new_price:
+                    supabase.table("price_history").insert({
+                        "source_id": source_id,
+                        "price": new_price
+                    }).execute()
 
         if not new_prices_data:
             continue
@@ -266,6 +287,7 @@ def process_vinyls():
         new_lowest = min(valid_new_prices)
         lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
 
+        # Logica di notifica Telegram
         if old_lowest is None:
             msg = f"<b>Inizio Monitoraggio</b>\n{artist} - {title}\n\n"
             msg += "Prezzi iniziali:\n"
@@ -273,7 +295,7 @@ def process_vinyls():
                 msg += f"• {p['site_name']}: {format_eur(p['price'])}\n"
             
             msg += f"\n<b>Prezzo minimo attuale:</b>\n{lowest_data['site_name']} a {format_eur(new_lowest)}"
-            send_telegram_alert(msg, lowest_data['url'], cover_url)
+            send_telegram_alert(msg, lowest_data['url'], vinyl_id, cover_url)
             continue
 
         if new_lowest < old_lowest:
@@ -284,7 +306,7 @@ def process_vinyls():
             msg += f"Il prezzo minimo è sceso a <b>{format_eur(new_lowest)}</b> su {lowest_data['site_name']}.\n"
             msg += f"Risparmio: {format_eur(drop_eur)} ({drop_pct:.1f}%).\n\n"
             msg += f"Precedente minimo: {format_eur(old_lowest)}"
-            send_telegram_alert(msg, lowest_data['url'], cover_url)
+            send_telegram_alert(msg, lowest_data['url'], vinyl_id, cover_url)
 
 if __name__ == "__main__":
     process_vinyls()
