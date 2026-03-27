@@ -22,7 +22,6 @@ def format_eur(price_float):
 def send_telegram_alert(msg_text, link_url, vinyl_id, cover_url=None):
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
     
-    # Aggiornati i bottoni in vista dell'interattività Webhook
     reply_markup = {
         "inline_keyboard": [
             [
@@ -66,7 +65,6 @@ def parse_price(price_str):
     match = re.search(r'\d+[.,]\d+|\d+', s)
     if match:
         val = match.group().replace(',', '.')
-        print(f"Price: {match}")
         try:
             return float(val)
         except ValueError:
@@ -102,35 +100,46 @@ def extract_image(soup):
     if amz_img and amz_img.get("src"):
         return amz_img["src"]
     return None
-    
-def scrape_amazon(soup):
-    # 1. Selettori CSS estremamente specifici per il box del prezzo principale
-    selectors = [
-        '#corePriceDisplay_desktop_feature_div .a-price .a-offscreen',
-        '#corePrice_desktop .a-price .a-offscreen',
-        '#buyNewSection .a-price .a-offscreen',
-        '#tmmSwatches .selected .a-color-price'
-    ]
 
-    for sel in selectors:
-        elem = soup.select_one(sel)
-        if elem and elem.text:
-            val = parse_price(elem.text)
+def scrape_amazon(soup):
+    # Isola la ricerca ESCLUSIVAMENTE alla colonna centrale dell'acquisto
+    center_col = soup.find("div", id="centerCol")
+    if not center_col:
+        return None
+
+    # 1. Cerca il tag a-offscreen dentro i blocchi di prezzo principali
+    price_spans = center_col.find_all("span", class_="a-price")
+    for p in price_spans:
+        offscreen = p.find("span", class_="a-offscreen")
+        if offscreen:
+            val = parse_price(offscreen.text)
             if val:
                 return val
 
-    # 2. Fallback sui componenti separati, ma isolati SOLO alla colonna centrale
-    center_col = soup.find("div", id="centerCol")
-    if center_col:
-        whole = center_col.find("span", class_="a-price-whole")
-        fraction = center_col.find("span", class_="a-price-fraction")
-        if whole and fraction:
-            w_text = re.sub(r'[^\d]', '', whole.text)
-            f_text = re.sub(r'[^\d]', '', fraction.text)
-            return parse_price(w_text + "." + f_text)
+    # 2. Cerca intero e decimale separati (es. 25,45)
+    whole = center_col.find("span", class_="a-price-whole")
+    fraction = center_col.find("span", class_="a-price-fraction")
+    if whole and fraction:
+        w_text = re.sub(r'[^\d]', '', whole.text)
+        f_text = re.sub(r'[^\d]', '', fraction.text)
+        val = parse_price(w_text + "." + f_text)
+        if val:
+            return val
 
+    # 3. Formato selezionato (vinile)
+    swatches = center_col.find("div", id="tmmSwatches")
+    if swatches:
+        selected = swatches.find("li", class_=re.compile("selected"))
+        if selected:
+            price_tag = selected.find("span", class_="a-color-price")
+            if price_tag:
+                val = parse_price(price_tag.text)
+                if val:
+                    return val
+
+    # NESSUN FALLBACK. Se non c'è qui, restituiamo None.
     return None
-    
+
 def scrape_feltrinelli(soup):
     json_price = extract_json_ld_price(soup)
     if json_price:
@@ -183,11 +192,16 @@ def get_current_data(url, site_name):
         'desktop': True
     })
     
+    # Header rafforzati per sembrare un vero browser italiano
     headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Cookie": "i18n-prefs=EUR; lc-acgit=it_IT;",
-        "Referer": "https://www.amazon.it/"
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.google.com/"
     }
     
     try:
@@ -197,6 +211,11 @@ def get_current_data(url, site_name):
         page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
         print(f"[{site_name}] Status Code: {response.status_code} | Titolo pagina: {page_title}")
         
+        # BLOCCO CAPTCHA AMAZON
+        if "amazon" in site_name.lower() and (page_title == "Amazon.it" or "captcha" in page_title.lower()):
+            print("!!! BLOCCATO DA AMAZON CAPTCHA !!! Salto la lettura.")
+            return None, None
+            
         image_url = extract_image(soup)
         price = None
         
@@ -210,6 +229,8 @@ def get_current_data(url, site_name):
             
         if price is None:
             print(f"Prezzo non trovato per {site_name}.")
+        else:
+            print(f"Prezzo rilevato: {price}")
             
         return price, image_url
     except Exception as e:
@@ -217,7 +238,6 @@ def get_current_data(url, site_name):
         return None, None
 
 def process_vinyls():
-    # Filtra solo i vinili attivi per lo scraping
     response = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
     vinyls = response.data
 
@@ -238,18 +258,15 @@ def process_vinyls():
         cover_updated = False
         
         for source in sources:
-            time.sleep(random.uniform(3, 6))
+            time.sleep(random.uniform(4, 8)) # Pausa allungata per ridurre sospetti
             
-            # Recupero dati attuali
             new_price, fetched_image = get_current_data(source["url"], source["site_name"])
             
-            # Aggiornamento cover se mancante
             if not cover_url and fetched_image and not cover_updated:
                 supabase.table("vinyls").update({"cover_url": fetched_image}).eq("id", vinyl_id).execute()
                 cover_url = fetched_image
                 cover_updated = True
             
-            # Gestione storico e aggiornamento DB se il prezzo è valido
             if new_price is not None:
                 new_prices_data.append({
                     "site_name": source["site_name"],
@@ -267,14 +284,11 @@ def process_vinyls():
                     "updated_at": "now()"
                 }
                 
-                # Gestione All-Time High/Low
                 if current_ath is None or current_ath == 0 or new_price < current_ath:
                     update_payload["ath_price"] = new_price
                 
-                # Aggiorna la tabella sources
                 supabase.table("sources").update(update_payload).eq("id", source_id).execute()
                 
-                # Scrivi nello storico se il prezzo è cambiato o non c'era
                 if current_db_price != new_price:
                     supabase.table("price_history").insert({
                         "source_id": source_id,
@@ -288,7 +302,6 @@ def process_vinyls():
         new_lowest = min(valid_new_prices)
         lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
 
-        # Logica di notifica Telegram
         if old_lowest is None:
             msg = f"<b>Inizio Monitoraggio</b>\n{artist} - {title}\n\n"
             msg += "Prezzi iniziali:\n"
