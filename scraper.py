@@ -66,6 +66,7 @@ def parse_price(price_str):
     match = re.search(r'\d+[.,]\d+|\d+', s)
     if match:
         val = match.group().replace(',', '.')
+        print(f"Price: {match}")
         try:
             return float(val)
         except ValueError:
