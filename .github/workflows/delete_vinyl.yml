@@ -1,0 +1,39 @@
+name: Delete Vinyl
+
+on:
+  repository_dispatch:
+    types: [delete_vinyl]
+
+jobs:
+  delete_from_supabase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install supabase
+
+      - name: Delete data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          python -c "
+          import os, json
+          from supabase import create_client
+
+          payload = json.loads(os.environ['PAYLOAD'])
+          url = os.environ.get('SUPABASE_URL')
+          key = os.environ.get('SUPABASE_KEY')
+          v_id = payload.get('id')
+
+          if not url or not key or not v_id:
+              print('Errore: Credenziali o ID mancanti.')
+              exit(1)
+
+          supabase = create_client(url, key)
+
+          # Eliminando il record in vinyls, i collegamenti in sources e price_history verranno rimossi automaticamente
+          supabase.table('vinyls').delete().eq('id', v_id).execute()
+          "
