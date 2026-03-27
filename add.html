@@ -5,25 +5,57 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Vinyl Registry</title>
     <style>
-        body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 20px; }
-        .container { max-width: 400px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 8px; }
-        h2 { margin-top: 0; color: #007bff; border-bottom: 1px solid #333; padding-bottom: 10px; }
-        label { display: block; margin: 10px 0 5px; font-size: 0.8em; color: #888; }
-        input { width: 100%; padding: 12px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #333; background: #252525; color: white; box-sizing: border-box; }
+        /* CSS Variables for Theme Support (Coerenti con index.html) */
+        :root {
+            --bg-color: #121212;
+            --container-bg: #1e1e1e;
+            --text-color: #eee;
+            --border-color: #333;
+            --input-bg: #252525;
+            --muted-text: #888;
+        }
+
+        body.light-mode {
+            --bg-color: #f4f4f9;
+            --container-bg: #ffffff;
+            --text-color: #222;
+            --border-color: #ddd;
+            --input-bg: #f9f9f9;
+            --muted-text: #666;
+        }
+
+        body { font-family: sans-serif; background: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; transition: background 0.3s, color 0.3s; }
+        .container { max-width: 400px; margin: auto; background: var(--container-bg); padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
         
-        button, .btn-link { width: 100%; padding: 14px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; box-sizing: border-box; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 15px; margin-bottom: 20px; }
+        h2 { margin: 0; color: #007bff; }
+        
+        .btn-theme { background: transparent; color: var(--text-color); border: 1px solid var(--border-color); padding: 8px 12px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 0.8em; transition: all 0.2s; }
+        .btn-theme:hover { background: var(--border-color); }
+        .btn-theme:active { transform: scale(0.95); }
+
+        label { display: block; margin: 10px 0 5px; font-size: 0.8em; color: var(--muted-text); }
+        input { width: 100%; padding: 12px; margin-bottom: 10px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--input-bg); color: var(--text-color); box-sizing: border-box; }
+        
+        button, .btn-link { width: 100%; padding: 14px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; box-sizing: border-box; transition: all 0.2s; }
         .btn-primary { background: #007bff; color: white; margin-bottom: 10px; }
-        .btn-primary:disabled { background: #444; cursor: not-allowed; }
+        .btn-primary:hover { filter: brightness(1.1); }
+        .btn-primary:active { transform: scale(0.98); }
+        .btn-primary:disabled { background: var(--border-color); color: var(--muted-text); cursor: not-allowed; transform: none; filter: none; }
         
-        .btn-link { background: #333; color: #ccc; display: block; text-align: center; text-decoration: none; font-size: 0.9em; }
-        .btn-link:hover { background: #444; color: white; }
+        .btn-link { background: #333; color: #eee; display: block; text-align: center; text-decoration: none; font-size: 0.9em; }
+        .btn-link:hover { background: #444; }
+        .btn-link:active { transform: scale(0.98); }
         
         .status-msg { margin-top: 15px; text-align: center; font-size: 0.9em; min-height: 1.2em; font-weight: bold; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2>Nuovo Vinile</h2>
+        <div class="header">
+            <h2>Nuovo Vinile</h2>
+            <button class="btn-theme" onclick="toggleTheme()" id="theme-toggle-btn">Chiar</button>
+        </div>
         
         <label>GitHub Personal Access Token</label>
         <input type="password" id="gh_token" placeholder="Inserisci il PAT">
@@ -44,6 +76,18 @@
     </div>
 
     <script>
+        // Gestione Tema (sincronizzata con index.html)
+        if (localStorage.getItem('theme') === 'light') {
+            document.body.classList.add('light-mode');
+            document.getElementById('theme-toggle-btn').innerText = 'Scura';
+        }
+        
+        function toggleTheme() {
+            const isLight = document.body.classList.toggle('light-mode');
+            localStorage.setItem('theme', isLight ? 'light' : 'dark');
+            document.getElementById('theme-toggle-btn').innerText = isLight ? 'Scura' : 'Chiara';
+        }
+
         document.getElementById('gh_token').value = localStorage.getItem('gh_pat') || '';
 
         async function sendData() {
@@ -63,7 +107,7 @@
 
             btn.disabled = true;
             status.innerText = "Invio in corso...";
-            status.style.color = "#eee";
+            status.style.color = "var(--text-color)";
 
             const payload = {
                 event_type: 'add_vinyl',
