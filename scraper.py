@@ -3,170 +3,360 @@ import re
 import time
 import json
 import random
+import logging
+import sys
 import cloudscraper
 from bs4 import BeautifulSoup
 from supabase import create_client
+import functions_framework
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('%(message)s'))
+if not logger.handlers:
+    logger.addHandler(handler)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:124.0) Gecko/20100101 Firefox/124.0"
+]
 
 def format_eur(price_float):
-    if price_float is None: return "N/D"
+    if price_float is None:
+        return "N/D"
     return f"{price_float:.2f}".replace(".", ",") + " EUR"
 
-def send_telegram_alert(msg_text, link_url, vinyl_id, cover_url=None):
+def send_telegram_alert(msg_text, vinyl_id, cover_url=None, keyboard=None):
+    if not TELEGRAM_TOKEN or not CHAT_ID: return
     base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    reply_markup = {
-        "inline_keyboard": [[
-            {"text": "Apri Link", "url": link_url},
-            {"text": "Statistiche", "callback_data": f"stats_{vinyl_id}"}
-        ]]
-    }
-    endpoint = f"{base_url}/sendPhoto" if cover_url else f"{base_url}/sendMessage"
+    
     payload = {
         "chat_id": CHAT_ID,
-        "parse_mode": "HTML",
-        "reply_markup": reply_markup,
-        ("photo" if cover_url else "text"): (cover_url if cover_url else msg_text)
+        "parse_mode": "HTML"
     }
-    if cover_url: payload["caption"] = msg_text
+    
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
+        
+    if cover_url:
+        endpoint = f"{base_url}/sendPhoto"
+        payload["photo"] = cover_url
+        payload["caption"] = msg_text
+    else:
+        endpoint = f"{base_url}/sendMessage"
+        payload["text"] = msg_text
+        
     try:
-        cloudscraper.create_scraper().post(endpoint, json=payload, timeout=10)
+        response = cloudscraper.create_scraper().post(endpoint, json=payload, timeout=10)
+        if not response.ok:
+            logger.error(f"Errore API Telegram: {response.text}")
     except Exception as e:
-        print(f"Errore Telegram: {e}")
+        logger.error(f"Errore connessione Telegram: {e}")
 
 def parse_price(price_str):
-    if not price_str: return None
+    if not price_str:
+        return None
     s = str(price_str).replace('€', '').replace('EUR', '').strip()
-    if '.' in s and ',' in s: s = s.replace('.', '')
+    if '.' in s and ',' in s:
+        s = s.replace('.', '')
     match = re.search(r'\d+[.,]\d+|\d+', s)
     if match:
         val = match.group().replace(',', '.')
-        try: return float(val)
-        except: return None
+        try:
+            return float(val)
+        except ValueError:
+            return None
     return None
 
-def scrape_amazon(soup):
-    # Prova prima dai dati strutturati (meno influenzati dal layout)
+def extract_json_ld_price(soup):
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
-            items = data if isinstance(data, list) else [data]
-            for item in items:
-                if 'offers' in item:
-                    offers = item['offers']
-                    if isinstance(offers, list): return float(offers[0].get('price'))
+            if isinstance(data, list):
+                for item in data:
+                    if item.get('@type') in ['Product', 'Book', 'MusicAlbum'] and 'offers' in item:
+                        offers = item['offers']
+                        if isinstance(offers, list):
+                            return float(offers[0].get('price'))
+                        return float(offers.get('price'))
+            elif isinstance(data, dict):
+                if data.get('@type') in ['Product', 'Book', 'MusicAlbum'] and 'offers' in data:
+                    offers = data['offers']
+                    if isinstance(offers, list):
+                        return float(offers[0].get('price'))
                     return float(offers.get('price'))
-        except: continue
+        except:
+            continue
+    return None
 
-    # Selettori visivi nel BuyBox o nell'area centrale
-    selectors = [
-        "#corePrice_desktop .a-price .a-offscreen",
-        "#corePriceDisplay_desktop_feature_div .a-price .a-offscreen",
-        "#buyNewSection .a-price .a-offscreen",
-        "#price_inside_buybox",
-        "#newBuyBoxPrice"
+def extract_image(soup):
+    meta_og = soup.find("meta", property="og:image")
+    if meta_og and meta_og.get("content"):
+        return meta_og["content"]
+    amz_img = soup.find("img", id="landingImage")
+    if amz_img and amz_img.get("src"):
+        return amz_img["src"]
+    return None
+
+def scrape_amazon(soup):
+    # Cerca il prezzo solo nei contenitori principali del Buy Box. Nessun fallback.
+    containers = [
+        soup.find("div", id="corePriceDisplay_desktop_feature_div"),
+        soup.find("div", id="corePrice_desktop"),
+        soup.find("div", id="price_inside_buybox"),
+        soup.find("div", id="apex_desktop"),
+        soup.find("div", id="tmmSwatches")
     ]
-    for sel in selectors:
-        elem = soup.select_one(sel)
-        if elem:
-            val = parse_price(elem.text)
+
+    for container in containers:
+        if not container:
+            continue
+        
+        offscreen = container.find("span", class_="a-offscreen")
+        if offscreen:
+            val = parse_price(offscreen.text)
             if val: return val
+            
+        whole = container.find("span", class_="a-price-whole")
+        fraction = container.find("span", class_="a-price-fraction")
+        if whole and fraction:
+            w_text = re.sub(r'[^\d]', '', whole.text)
+            f_text = re.sub(r'[^\d]', '', fraction.text)
+            val = parse_price(w_text + "." + f_text)
+            if val: return val
+            
+        color_price = container.find("span", class_="a-color-price")
+        if color_price:
+            val = parse_price(color_price.text)
+            if val: return val
+
+    for hid in ["attach-base-product-price", "twister-plus-price-data-price"]:
+        inp = soup.find("input", id=hid)
+        if inp and inp.get("value"):
+            base_val = parse_price(inp["value"])
+            if base_val: return base_val
+
+    return None
+
+def scrape_feltrinelli(soup):
+    json_price = extract_json_ld_price(soup)
+    if json_price:
+        return json_price
+
+    for script in soup.find_all("script"):
+        if script.string and "price" in script.string.lower():
+            match = re.search(r'"price"\s*:\s*"?(\d+[.,]\d{2})"?', script.string)
+            if match:
+                return parse_price(match.group(1))
+
+    price_tag = soup.find("span", {"class": "price"})
+    if price_tag:
+        return parse_price(price_tag.text)
+        
+    return None
+
+def scrape_other(soup, url):
+    if "discotecalaziale" in url.lower():
+        price_div = soup.find("div", {"class": "price"})
+        if price_div:
+            val = parse_price(price_div.text)
+            if val is not None:
+                return val
+
+    json_price = extract_json_ld_price(soup)
+    if json_price:
+        return json_price
+
+    price_elements = soup.find_all(class_=re.compile("price", re.I))
+    for el in price_elements:
+        val = parse_price(el.text)
+        if val is not None:
+            return val
+
+    euro_pattern = re.compile(r'€\s*\d+[.,]\d{2}|\d+[.,]\d{2}\s*€')
+    match = soup.find(string=euro_pattern)
+    if match:
+        found = euro_pattern.search(match).group()
+        return parse_price(found)
+
     return None
 
 def get_current_data(url, site_name):
-    print(f"Controllo {site_name}: {url}")
-    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome','platform': 'windows','desktop': True})
+    logger.info(f"Controllo {site_name}: {url}")
+    
+    scraper = cloudscraper.create_scraper(browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    })
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "it-IT,it;q=0.9",
-        "Referer": "https://www.google.com/"
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.8,en-US;q=0.5,en;q=0.3",
+        "Referer": "https://www.google.it/",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
-
+    
     try:
         response = scraper.get(url, headers=headers, timeout=20)
         soup = BeautifulSoup(response.content, "html.parser")
-        title = soup.title.string.strip() if soup.title else ""
         
-        if "amazon" in site_name.lower() and ("captcha" in title.lower() or title == "Amazon.it"):
-            print("BLOCCATO DA CAPTCHA")
-            return None, None
-            
+        page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
+        logger.info(f"[{site_name}] Status: {response.status_code} | Titolo: {page_title}")
+        
+        image_url = extract_image(soup)
         price = None
-        if "amazon" in site_name.lower():
-            price = scrape_amazon(soup)
-        elif "feltrinelli" in site_name.lower():
-            price_meta = soup.find("meta", property="product:price:amount")
-            if price_meta: price = float(price_meta["content"])
-        else:
-            price_elements = soup.find_all(class_=re.compile("price", re.I))
-            for el in price_elements:
-                val = parse_price(el.text)
-                if val: price = val; break
-
-        print(f"Prezzo rilevato: {price}")
-        img = None
-        og_img = soup.find("meta", property="og:image")
-        if og_img: img = og_img["content"]
         
-        return price, img
+        name_lower = site_name.lower()
+        if "amazon" in name_lower:
+            if "captcha" in page_title.lower() or page_title == "Amazon.it":
+                logger.info("BLOCCATO DA CAPTCHA AMAZON")
+                return None, None
+            price = scrape_amazon(soup)
+        elif "feltrinelli" in name_lower:
+            price = scrape_feltrinelli(soup)
+        else:
+            price = scrape_other(soup, url)
+            
+        logger.info(f"Prezzo rilevato per {site_name}: {price}")
+        return price, image_url
     except Exception as e:
-        print(f"Errore {site_name}: {e}")
+        logger.error(f"Errore scraping {site_name}: {url}: {e}")
         return None, None
 
-def process_vinyls():
-    res = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
-    for vinyl in res.data:
+@functions_framework.http
+def run_scraper(request):
+    logger.info("*** AVVIO PROCESSO SCRAPER ***")
+    if not supabase: return "Errore Configurazione Supabase", 500
+
+    response = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
+    vinyls = response.data
+
+    for vinyl in vinyls:
+        artist = vinyl["artist"]
+        title = vinyl["title"]
+        cover_url = vinyl.get("cover_url")
         sources = vinyl.get("sources", [])
-        if not sources: continue
-
-        # Trova il vecchio minimo assoluto tra tutte le sorgenti attive
-        valid_old_prices = [s["current_price"] for s in sources if s["current_price"] is not None]
-        old_min_total = min(valid_old_prices) if valid_old_prices else None
+        vinyl_id = vinyl["id"]
         
-        current_run_min = None
-        best_source_run = None
+        if not sources:
+            continue
 
+        old_prices = [s["current_price"] for s in sources if s["current_price"] is not None]
+        old_lowest = min(old_prices) if old_prices else None
+        
+        new_prices_data = []
+        cover_updated = False
+        
         for source in sources:
-            time.sleep(random.uniform(5, 10))
-            new_p, new_img = get_current_data(source["url"], source["site_name"])
+            time.sleep(random.uniform(5, 12))
             
-            if new_p is not None:
-                if not vinyl.get("cover_url") and new_img:
-                    supabase.table("vinyls").update({"cover_url": new_img}).eq("id", vinyl["id"]).execute()
+            new_price, fetched_image = get_current_data(source["url"], source["site_name"])
+            
+            if not cover_url and fetched_image and not cover_updated:
+                supabase.table("vinyls").update({"cover_url": fetched_image}).eq("id", vinyl_id).execute()
+                cover_url = fetched_image
+                cover_updated = True
+            
+            if new_price is not None:
+                new_prices_data.append({
+                    "site_name": source["site_name"],
+                    "url": source["url"],
+                    "price": new_price
+                })
                 
                 source_id = source["id"]
-                old_p_source = source["current_price"]
+                current_db_price = source.get("current_price")
+                current_ath = source.get("ath_price")
                 
-                # Update source data
-                update_data = {"current_price": new_p, "last_price": old_p_source, "updated_at": "now()"}
-                if source["ath_price"] is None or new_p < source["ath_price"]:
-                    update_data["ath_price"] = new_p
+                update_payload = {
+                    "last_price": current_db_price,
+                    "current_price": new_price,
+                    "updated_at": "now()"
+                }
                 
-                supabase.table("sources").update(update_data).eq("id", source_id).execute()
+                if current_ath is None or current_ath == 0 or new_price < current_ath:
+                    update_payload["ath_price"] = new_price
                 
-                # Salva nello storico solo se il prezzo e cambiato davvero rispetto all ultimo salvato
-                if old_p_source != new_p:
-                    supabase.table("price_history").insert({"source_id": source_id, "price": new_p}).execute()
+                supabase.table("sources").update(update_payload).eq("id", source_id).execute()
                 
-                if current_run_min is None or new_p < current_run_min:
-                    current_run_min = new_p
-                    best_source_run = source
+                if current_db_price != new_price:
+                    supabase.table("price_history").insert({
+                        "source_id": source_id,
+                        "price": new_price
+                    }).execute()
 
-        # Alert se il nuovo minimo assoluto e inferiore al vecchio minimo assoluto
-        if current_run_min and old_min_total and current_run_min < old_min_total:
-            diff = old_min_total - current_run_min
-            perc = (diff / old_min_total) * 100
-            msg = f"<b>🔥 CALO PREZZO!</b>\n{vinyl['artist']} - {vinyl['title']}\n\n"
-            msg += f"Nuovo minimo: <b>{format_eur(current_run_min)}</b> su {best_source_run['site_name']}\n"
-            msg += f"Risparmio: {format_eur(diff)} (-{perc:.1f}%)\n"
-            msg += f"Precedente: {format_eur(old_min_total)}"
-            send_telegram_alert(msg, best_source_run["url"], vinyl["id"], vinyl.get("cover_url"))
+        if not new_prices_data:
+            continue
 
-if __name__ == "__main__":
-    process_vinyls()
+        valid_new_prices = [p["price"] for p in new_prices_data]
+        new_lowest = min(valid_new_prices)
+        lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
+
+        # Gestione notifica Inizio Monitoraggio
+        if old_lowest is None:
+            msg = f"🟢 <b>Inizio monitoraggio</b>\n{artist} - {title}\n\n"
+            msg += "Prezzi iniziali:\n"
+            for p in new_prices_data:
+                msg += f"su <b>{p['site_name']}</b>: {format_eur(p['price'])}\n"
+            
+            msg += f"\n<b>Prezzo minimo attuale:</b>\n{lowest_data['site_name']} a {format_eur(new_lowest)}"
+            
+            keyboard = []
+            keyboard.append([{"text": f"COMPRA SU {lowest_data['site_name'].upper()}", "url": lowest_data['url']}])
+            
+            other_btns = [{"text": p['site_name'].upper(), "url": p['url']} for p in new_prices_data if p['site_name'] != lowest_data['site_name']]
+            for i in range(0, len(other_btns), 2):
+                keyboard.append(other_btns[i:i+2])
+                
+            keyboard.append([{"text": "AGGIUNGI LINK", "callback_data": f"addlink_{vinyl_id}"}])
+            keyboard.append([{"text": "STATISTICHE", "callback_data": f"stats_{vinyl_id}"}])
+            
+            send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
+            logger.info(f"Notifica Inizio Monitoraggio inviata per {title}")
+            continue
+
+        # Gestione notifica Calo di Prezzo
+        if new_lowest < old_lowest:
+            drop_eur = old_lowest - new_lowest
+            drop_pct = (drop_eur / old_lowest) * 100
+            
+            msg = f"🔥 <b>Calo di prezzo!</b>\n{artist} - {title}\n\n"
+            msg += f"Il prezzo minimo e sceso a <b>{format_eur(new_lowest)}</b> su <b>{lowest_data['site_name']}</b>\n"
+            msg += f"Risparmio: {format_eur(drop_eur)} ({drop_pct:.1f}%)\n\n"
+            
+            for p in new_prices_data:
+                if p['site_name'] != lowest_data['site_name']:
+                    diff_pct = ((p['price'] - new_lowest) / new_lowest) * 100
+                    msg += f"prezzo su <b>{p['site_name']}</b>: {format_eur(p['price'])} (+{diff_pct:.1f}%)\n"
+                    
+            keyboard = []
+            keyboard.append([{"text": f"COMPRA SU {lowest_data['site_name'].upper()}", "url": lowest_data['url']}])
+            
+            other_btns = [{"text": p['site_name'].upper(), "url": p['url']} for p in new_prices_data if p['site_name'] != lowest_data['site_name']]
+            for i in range(0, len(other_btns), 2):
+                keyboard.append(other_btns[i:i+2])
+                
+            keyboard.append([{"text": "STATISTICHE", "callback_data": f"stats_{vinyl_id}"}])
+            keyboard.append([
+                {"text": "SOSPENDI", "callback_data": f"pause_{vinyl_id}"},
+                {"text": "ELIMINA", "callback_data": f"delete_{vinyl_id}"}
+            ])
+
+            send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
+            logger.info(f"Notifica Calo Prezzo inviata per {title}")
+
+    logger.info("*** FINE PROCESSO ***")
+    return "OK", 200
