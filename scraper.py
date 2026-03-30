@@ -34,7 +34,7 @@ USER_AGENTS = [
 def format_eur(price_float):
     if price_float is None:
         return "N/D"
-    return f"{price_float:.2f}".replace(".", ",") + " EUR"
+    return f"{price_float:.2f}".replace(".", ",") + " €"
 
 def send_telegram_alert(msg_text, vinyl_id, cover_url=None, keyboard=None):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -307,8 +307,8 @@ def run_scraper(request):
 
         # Gestione notifica Inizio Monitoraggio
         if old_lowest is None:
-            msg = f"🟢 <b>Inizio monitoraggio</b>\n{artist} - {title}\n\n"
-            msg += "Prezzi iniziali:\n"
+            msg = f"🟢 <b>INIZIO MONITORAGGIO</b> 🟢\n\n{artist} - {title}\n\n"
+            msg += "<b>Prezzi iniziali</b>:\n"
             for p in new_prices_data:
                 msg += f"su <b>{p['site_name']}</b>: {format_eur(p['price'])}\n"
             
@@ -333,9 +333,9 @@ def run_scraper(request):
             drop_eur = old_lowest - new_lowest
             drop_pct = (drop_eur / old_lowest) * 100
             
-            msg = f"🔥 <b>Calo di prezzo!</b>\n{artist} - {title}\n\n"
-            msg += f"Il prezzo minimo e sceso a <b>{format_eur(new_lowest)}</b> su <b>{lowest_data['site_name']}</b>\n"
-            msg += f"Risparmio: {format_eur(drop_eur)} ({drop_pct:.1f}%)\n\n"
+            msg = f"🔥 <b>CALO DI PREZZO!</b> 🔥\n\n{artist} - {title}\n\n"
+            msg += f"Il prezzo minimo è sceso a <b>{format_eur(new_lowest)}</b> su <b>{lowest_data['site_name']}</b>\n"
+            msg += f"<b>Risparmio</b>: {format_eur(drop_eur)} ({drop_pct:.1f}%)\n\n"
             
             for p in new_prices_data:
                 if p['site_name'] != lowest_data['site_name']:
