@@ -472,8 +472,8 @@ def telegram_webhook(request):
             answer_callback(cb_id, "Vinile eliminato dal DB")
             if chat_id and msg_id:
                 edit_telegram_message(chat_id, msg_id, "<b>VINILE ELIMINATO</b>\nIl vinile e tutti i suoi link sono stati rimossi dal database.")
-
-      elif action == "stats":
+    
+        elif action == "stats":
             answer_callback(cb_id, "Elaborazione in corso...")
             try:
                 res = supabase.table("vinyls").select("artist, title, sources(site_name, current_price, ath_price)").eq("id", record_id).execute()
