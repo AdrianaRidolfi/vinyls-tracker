@@ -8,8 +8,9 @@ import sys
 import cloudscraper
 from bs4 import BeautifulSoup
 from supabase import create_client
-import functions_framework
+from flask import Flask, request
 
+app = Flask(__name__)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
@@ -30,6 +31,17 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:124.0) Gecko/20100101 Firefox/124.0"
 ]
+
+@app.route('/trigger', methods=['GET'])
+def trigger():
+    token = request.args.get('token')
+    expected_token = os.environ.get('SCRAPER_TOKEN')
+
+    if token != expected_token:
+        return "Unauthorized", 401
+
+    run_scraper()
+    return "Success", 200
 
 def format_eur(price_float):
     if price_float is None:
@@ -109,7 +121,6 @@ def extract_image(soup):
     return None
 
 def scrape_amazon(soup):
-    # Cerca il prezzo solo nei contenitori principali del Buy Box. Nessun fallback.
     containers = [
         soup.find("div", id="corePriceDisplay_desktop_feature_div"),
         soup.find("div", id="corePrice_desktop"),
@@ -236,8 +247,7 @@ def get_current_data(url, site_name):
         logger.error(f"Errore scraping {site_name}: {url}: {e}")
         return None, None
 
-@functions_framework.http
-def run_scraper(request):
+def run_scraper():
     logger.info("*** AVVIO PROCESSO SCRAPER ***")
     if not supabase: return "Errore Configurazione Supabase", 500
 
@@ -305,7 +315,6 @@ def run_scraper(request):
         new_lowest = min(valid_new_prices)
         lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
 
-        # Gestione notifica Inizio Monitoraggio
         if old_lowest is None:
             msg = f"🟢 <b>INIZIO MONITORAGGIO</b> 🟢\n\n{artist} - {title}\n\n"
             msg += "<b>Prezzi iniziali</b>:\n"
@@ -328,7 +337,6 @@ def run_scraper(request):
             logger.info(f"Notifica Inizio Monitoraggio inviata per {title}")
             continue
 
-        # Gestione notifica Calo di Prezzo
         if new_lowest < old_lowest:
             drop_eur = old_lowest - new_lowest
             drop_pct = (drop_eur / old_lowest) * 100
@@ -360,7 +368,6 @@ def run_scraper(request):
 
     logger.info("*** FINE PROCESSO ***")
     return "OK", 200
-
 
 def answer_callback(callback_query_id, text=None):
     if not TELEGRAM_TOKEN: return
@@ -398,23 +405,18 @@ def get_site_name_from_url(url):
     if "ibs" in url_lower: return "IBS"
     return "Altro"
 
-@functions_framework.http
-def telegram_webhook(request):
-    if request.method != "POST":
-        return "Only POST allowed", 405
-
+@app.route('/webhook', methods=['POST'])
+def telegram_webhook():
     update = request.get_json()
     if not update:
         return "OK", 200
 
-    # Gestione ricezione link testuali
     if "message" in update:
         msg = update["message"]
         chat_id = msg.get("chat", {}).get("id")
         text = msg.get("text", "")
         reply_to = msg.get("reply_to_message")
 
-        # Verifica che il messaggio sia una risposta a una nostra richiesta
         if reply_to and reply_to.get("text") and "[ID_VINILE:" in reply_to["text"]:
             try:
                 record_id = reply_to["text"].split("[ID_VINILE:")[1].split("]")[0]
@@ -431,7 +433,6 @@ def telegram_webhook(request):
             site_name = get_site_name_from_url(text)
 
             try:
-                # Inserimento nuovo link nel database
                 supabase.table("sources").insert({
                     "vinyl_id": record_id,
                     "site_name": site_name,
@@ -446,7 +447,6 @@ def telegram_webhook(request):
             cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
             return "OK", 200
 
-    # Gestione click sui bottoni
     if "callback_query" in update:
         cb = update["callback_query"]
         cb_id = cb["id"]
@@ -490,7 +490,6 @@ def telegram_webhook(request):
                     
                     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                     
-                    # Creazione del bottone Aggiungi Link
                     keyboard = {
                         "inline_keyboard": [
                             [{"text": "AGGIUNGI LINK", "callback_data": f"addlink_{record_id}"}]
@@ -518,3 +517,7 @@ def telegram_webhook(request):
             cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
 
     return "OK", 200
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
