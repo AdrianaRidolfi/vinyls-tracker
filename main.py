@@ -390,6 +390,14 @@ def edit_telegram_message(chat_id, message_id, new_text):
     except Exception as e:
         logger.error(f"Errore edit_telegram_message: {e}")
 
+def get_site_name_from_url(url):
+    url_lower = url.lower()
+    if "amazon" in url_lower: return "Amazon"
+    if "feltrinelli" in url_lower: return "Feltrinelli"
+    if "discotecalaziale" in url_lower: return "Discoteca Laziale"
+    if "ibs" in url_lower: return "IBS"
+    return "Altro"
+
 @functions_framework.http
 def telegram_webhook(request):
     if request.method != "POST":
@@ -399,6 +407,46 @@ def telegram_webhook(request):
     if not update:
         return "OK", 200
 
+    # Gestione ricezione link testuali
+    if "message" in update:
+        msg = update["message"]
+        chat_id = msg.get("chat", {}).get("id")
+        text = msg.get("text", "")
+        reply_to = msg.get("reply_to_message")
+
+        # Verifica che il messaggio sia una risposta a una nostra richiesta
+        if reply_to and reply_to.get("text") and "[ID_VINILE:" in reply_to["text"]:
+            try:
+                record_id = reply_to["text"].split("[ID_VINILE:")[1].split("]")[0]
+            except Exception:
+                return "OK", 200
+
+            url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            
+            if "http" not in text:
+                payload = {"chat_id": chat_id, "text": "Errore: Inserisci un link valido che inizi con http/https."}
+                cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
+                return "OK", 200
+
+            site_name = get_site_name_from_url(text)
+
+            try:
+                # Inserimento nuovo link nel database
+                supabase.table("sources").insert({
+                    "vinyl_id": record_id,
+                    "site_name": site_name,
+                    "url": text
+                }).execute()
+                
+                payload = {"chat_id": chat_id, "text": f"Link di {site_name} aggiunto con successo al database!"}
+            except Exception as e:
+                logger.error(f"Errore inserimento link DB: {e}")
+                payload = {"chat_id": chat_id, "text": "Errore di salvataggio nel database."}
+                
+            cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
+            return "OK", 200
+
+    # Gestione click sui bottoni
     if "callback_query" in update:
         cb = update["callback_query"]
         cb_id = cb["id"]
@@ -425,14 +473,13 @@ def telegram_webhook(request):
             if chat_id and msg_id:
                 edit_telegram_message(chat_id, msg_id, "<b>VINILE ELIMINATO</b>\nIl vinile e tutti i suoi link sono stati rimossi dal database.")
 
-        elif action == "stats":
+      elif action == "stats":
             answer_callback(cb_id, "Elaborazione in corso...")
-            
             try:
                 res = supabase.table("vinyls").select("artist, title, sources(site_name, current_price, ath_price)").eq("id", record_id).execute()
                 if res.data and res.data[0].get("sources"):
                     v = res.data[0]
-                    stats_msg = f"📊<b>STATISTICHE 📊 \n{v['artist']} {v['title']}</b>\n\n"
+                    stats_msg = f"<b>STATISTICHE: {v['artist']} {v['title']}</b>\n\n"
                     
                     for s in v["sources"]:
                         cp = s.get("current_price")
@@ -442,12 +489,32 @@ def telegram_webhook(request):
                         stats_msg += f"Minimo storico: {format_eur(ath)}\n\n"
                     
                     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                    payload = {"chat_id": chat_id, "text": stats_msg, "parse_mode": "HTML"}
+                    
+                    # Creazione del bottone Aggiungi Link
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{"text": "AGGIUNGI LINK", "callback_data": f"addlink_{record_id}"}]
+                        ]
+                    }
+                    
+                    payload = {
+                        "chat_id": chat_id, 
+                        "text": stats_msg, 
+                        "parse_mode": "HTML",
+                        "reply_markup": keyboard
+                    }
                     cloudscraper.create_scraper().post(url, json=payload, timeout=5)
             except Exception as e:
                 logger.error(f"Errore statistiche: {e}")
-            
+                
         elif action == "addlink":
-            answer_callback(cb_id, "La funzione per aggiungere link arriverà presto!")
+            answer_callback(cb_id, "In attesa del link...")
+            url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": f"Incolla il link da aggiungere rispondendo a questo messaggio.\n[ID_VINILE:{record_id}]",
+                "reply_markup": {"force_reply": True}
+            }
+            cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
 
     return "OK", 200
