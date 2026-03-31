@@ -426,7 +426,26 @@ def telegram_webhook(request):
                 edit_telegram_message(chat_id, msg_id, "<b>VINILE ELIMINATO</b>\nIl vinile e tutti i suoi link sono stati rimossi dal database.")
 
         elif action == "stats":
-            answer_callback(cb_id, "Le statistiche arriveranno presto!")
+            answer_callback(cb_id, "Elaborazione in corso...")
+            
+            try:
+                res = supabase.table("vinyls").select("artist, title, sources(site_name, current_price, ath_price)").eq("id", record_id).execute()
+                if res.data and res.data[0].get("sources"):
+                    v = res.data[0]
+                    stats_msg = f"📊<b>STATISTICHE 📊 /n{v['artist']} {v['title']}</b>\n\n"
+                    
+                    for s in v["sources"]:
+                        cp = s.get("current_price")
+                        ath = s.get("ath_price")
+                        stats_msg += f"<b>{s['site_name']}</b>\n"
+                        stats_msg += f"Attuale: {format_eur(cp)}\n"
+                        stats_msg += f"Minimo storico: {format_eur(ath)}\n\n"
+                    
+                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                    payload = {"chat_id": chat_id, "text": stats_msg, "parse_mode": "HTML"}
+                    cloudscraper.create_scraper().post(url, json=payload, timeout=5)
+            except Exception as e:
+                logger.error(f"Errore statistiche: {e}")
             
         elif action == "addlink":
             answer_callback(cb_id, "La funzione per aggiungere link arriverà presto!")
