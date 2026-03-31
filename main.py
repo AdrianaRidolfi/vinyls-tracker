@@ -6,6 +6,7 @@ import random
 import logging
 import sys
 import cloudscraper
+import threading
 from bs4 import BeautifulSoup
 from supabase import create_client
 from flask import Flask, request
@@ -40,8 +41,12 @@ def trigger():
     if token != expected_token:
         return "Unauthorized", 401
 
-    run_scraper()
-    return "Success", 200
+    # Lancia lo scraper in un thread separato
+    thread = threading.Thread(target=run_scraper)
+    thread.start()
+
+    # Risponde subito a GitHub Actions
+    return "Scraper avviato in background", 200
 
 def format_eur(price_float):
     if price_float is None:
