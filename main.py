@@ -360,3 +360,75 @@ def run_scraper(request):
 
     logger.info("*** FINE PROCESSO ***")
     return "OK", 200
+
+
+def answer_callback(callback_query_id, text=None):
+    if not TELEGRAM_TOKEN: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text: payload["text"] = text
+    try:
+        cloudscraper.create_scraper().post(url, json=payload, timeout=5)
+    except Exception as e:
+        logger.error(f"Errore answerCallbackQuery: {e}")
+
+def edit_telegram_message(chat_id, message_id, new_text):
+    if not TELEGRAM_TOKEN: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageCaption"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": new_text,
+        "parse_mode": "HTML"
+    }
+    try:
+        resp = cloudscraper.create_scraper().post(url, json=payload, timeout=5)
+        if not resp.ok:
+            url_text = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+            payload["text"] = payload.pop("caption")
+            cloudscraper.create_scraper().post(url_text, json=payload, timeout=5)
+    except Exception as e:
+        logger.error(f"Errore edit_telegram_message: {e}")
+
+@functions_framework.http
+def telegram_webhook(request):
+    if request.method != "POST":
+        return "Only POST allowed", 405
+
+    update = request.get_json()
+    if not update:
+        return "OK", 200
+
+    if "callback_query" in update:
+        cb = update["callback_query"]
+        cb_id = cb["id"]
+        data = cb.get("data", "")
+        msg = cb.get("message", {})
+        chat_id = msg.get("chat", {}).get("id")
+        msg_id = msg.get("message_id")
+        
+        if not data or not supabase:
+            answer_callback(cb_id, "Errore di sistema.")
+            return "OK", 200
+
+        action, record_id = data.split("_", 1)
+        
+        if action == "pause":
+            supabase.table("vinyls").update({"is_active": False}).eq("id", record_id).execute()
+            answer_callback(cb_id, "Monitoraggio sospeso")
+            if chat_id and msg_id:
+                edit_telegram_message(chat_id, msg_id, "<b>MONITORAGGIO SOSPESO</b>\nRicevuto! Non ti invierò più notifiche per questo vinile.")
+
+        elif action == "delete":
+            supabase.table("vinyls").delete().eq("id", record_id).execute()
+            answer_callback(cb_id, "Vinile eliminato dal DB")
+            if chat_id and msg_id:
+                edit_telegram_message(chat_id, msg_id, "<b>VINILE ELIMINATO</b>\nIl vinile e tutti i suoi link sono stati rimossi dal database.")
+
+        elif action == "stats":
+            answer_callback(cb_id, "Le statistiche arriveranno presto!")
+            
+        elif action == "addlink":
+            answer_callback(cb_id, "La funzione per aggiungere link arriverà presto!")
+
+    return "OK", 200
