@@ -1,1 +1,1 @@
-web: functions-framework --target=run_scraper --port=$PORT
+web: functions-framework --target=$FUNCTION_TARGET --port=$PORT
