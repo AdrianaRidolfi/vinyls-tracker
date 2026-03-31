@@ -479,7 +479,7 @@ def telegram_webhook(request):
                 res = supabase.table("vinyls").select("artist, title, sources(site_name, current_price, ath_price)").eq("id", record_id).execute()
                 if res.data and res.data[0].get("sources"):
                     v = res.data[0]
-                    stats_msg = f"<b>STATISTICHE: {v['artist']} {v['title']}</b>\n\n"
+                    stats_msg = f"<b>📊 STATISTICHE 📊 \n {v['artist']} - {v['title']}</b>\n\n"
                     
                     for s in v["sources"]:
                         cp = s.get("current_price")
