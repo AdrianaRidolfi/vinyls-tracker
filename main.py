@@ -494,7 +494,7 @@ def send_regali_list(chat_id) -> None:
                 "Ciao! 👋 Grazie per avermi chiesto cosa vorrei per regalo!\n\n"
                 "Questa è la lista dei vinili che mi piacerebbe tanto avere. "
                 "Se decidi di regalarmene uno, cliccaci sopra e prenotalo: in questo modo "
-                "verrà nascosto agli altri, così non riceverò regali doppi. ✨💿✨\n\n"
+                "verrà nascosto agli altri, così non riceverò regali doppi. ✨💿✨\n"
                 "I prezzi che vedi sono i più bassi trovati online dal mio bot (potrebbero "
                 "esserci piccole variazioni nel momento in cui clicchi), ma sentiti "
                 "liberissim* di comprarlo dove preferisci, anche usato o dal tuo negozio "
@@ -522,10 +522,10 @@ def send_regali_list(chat_id) -> None:
         for v in vinyls:
             prices       = [s["current_price"] for s in v.get("sources", []) if s.get("current_price") is not None]
             lowest_price = min(prices) if prices else None
-            price_str    = f" — {format_eur(lowest_price)}" if lowest_price else ""
+            price_str    = f" - {format_eur(lowest_price)}" if lowest_price else ""
             is_mine      = str(v.get("reserved_by")) == str(chat_id)
             icon         = "✅" if is_mine else "💿"
-            btn_text     = f"{icon} {v['artist']} — {v['title']}{price_str}"
+            btn_text     = f"{icon} {v['artist']} {v['title']}{price_str}"
             keyboard.append([{"text": btn_text, "callback_data": f"regalo_{v['id']}"}])
 
         if not keyboard:
