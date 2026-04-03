@@ -5,169 +5,238 @@ import json
 import random
 import logging
 import sys
-import cloudscraper
 import threading
+
+import cloudscraper
 from bs4 import BeautifulSoup
 from supabase import create_client
 from flask import Flask, request
 
-app = Flask(__name__)
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(logging.Formatter('%(message)s'))
-if not logger.handlers:
-    logger.addHandler(handler)
+# ---------------------------------------------------------------------------
+# App & logging
+# ---------------------------------------------------------------------------
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+app = Flask(__name__)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+if not logger.handlers:
+    logger.addHandler(_handler)
+
+# ---------------------------------------------------------------------------
+# Environment / clients
+# ---------------------------------------------------------------------------
+
+SUPABASE_URL    = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY    = os.environ.get("SUPABASE_KEY")
+TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID         = os.environ.get("CHAT_ID")
+SCRAPER_TOKEN   = os.environ.get("SCRAPER_TOKEN")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+# Single shared scraper instance — avoids recreating it on every request
+_scraper = cloudscraper.create_scraper(
+    browser={"browser": "chrome", "platform": "windows", "desktop": True}
+)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:124.0) Gecko/20100101 Firefox/124.0"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:124.0) Gecko/20100101 Firefox/124.0",
 ]
 
-@app.route('/trigger', methods=['GET'])
-def trigger():
-    token = request.args.get('token')
-    expected_token = os.environ.get('SCRAPER_TOKEN')
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
 
-    if token != expected_token:
-        return "Unauthorized", 401
-
-    # Lancia lo scraper in un thread separato
-    thread = threading.Thread(target=run_scraper)
-    thread.start()
-
-    # Risponde subito a GitHub Actions
-    return "Scraper avviato in background", 200
-
-def format_eur(price_float):
-    if price_float is None:
+def format_eur(price: float | None) -> str:
+    if price is None:
         return "N/D"
-    return f"{price_float:.2f}".replace(".", ",") + " €"
+    return f"{price:.2f}".replace(".", ",") + " €"
 
-def send_telegram_alert(msg_text, vinyl_id, cover_url=None, keyboard=None):
-    if not TELEGRAM_TOKEN or not CHAT_ID: return
-    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-    
-    payload = {
-        "chat_id": CHAT_ID,
-        "parse_mode": "HTML"
-    }
-    
-    if keyboard:
-        payload["reply_markup"] = {"inline_keyboard": keyboard}
-        
-    if cover_url:
-        endpoint = f"{base_url}/sendPhoto"
-        payload["photo"] = cover_url
-        payload["caption"] = msg_text
-    else:
-        endpoint = f"{base_url}/sendMessage"
-        payload["text"] = msg_text
-        
-    try:
-        response = cloudscraper.create_scraper().post(endpoint, json=payload, timeout=10)
-        if not response.ok:
-            logger.error(f"Errore API Telegram: {response.text}")
-    except Exception as e:
-        logger.error(f"Errore connessione Telegram: {e}")
 
-def parse_price(price_str):
+def parse_price(price_str) -> float | None:
     if not price_str:
         return None
-    s = str(price_str).replace('€', '').replace('EUR', '').strip()
-    if '.' in s and ',' in s:
-        s = s.replace('.', '')
-    match = re.search(r'\d+[.,]\d+|\d+', s)
+    s = str(price_str).replace("€", "").replace("EUR", "").strip()
+    if "." in s and "," in s:
+        s = s.replace(".", "")
+    match = re.search(r"\d+[.,]\d+|\d+", s)
     if match:
-        val = match.group().replace(',', '.')
         try:
-            return float(val)
+            return float(match.group().replace(",", "."))
         except ValueError:
             return None
     return None
 
-def extract_json_ld_price(soup):
+
+def get_site_name_from_url(url: str) -> str:
+    url_lower = url.lower()
+    if "amazon"           in url_lower: return "Amazon"
+    if "feltrinelli"      in url_lower: return "Feltrinelli"
+    if "discotecalaziale" in url_lower: return "Discoteca Laziale"
+    if "ibs"              in url_lower: return "IBS"
+    return "Altro"
+
+# ---------------------------------------------------------------------------
+# Telegram helpers
+# ---------------------------------------------------------------------------
+
+def _tg_post(endpoint: str, payload: dict, timeout: int = 10) -> bool:
+    """Low-level POST to the Telegram Bot API. Returns True on success."""
+    if not TELEGRAM_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{endpoint}"
+    try:
+        resp = _scraper.post(url, json=payload, timeout=timeout)
+        if not resp.ok:
+            logger.error("Telegram API error [%s]: %s", endpoint, resp.text)
+        return resp.ok
+    except Exception as exc:
+        logger.error("Errore connessione Telegram [%s]: %s", endpoint, exc)
+        return False
+
+
+def send_telegram_alert(
+    text: str,
+    vinyl_id,
+    cover_url: str | None = None,
+    keyboard: list | None = None,
+) -> None:
+    if not CHAT_ID:
+        return
+    payload = {"chat_id": CHAT_ID, "parse_mode": "HTML"}
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
+
+    if cover_url:
+        payload["photo"]   = cover_url
+        payload["caption"] = text
+        _tg_post("sendPhoto", payload)
+    else:
+        payload["text"] = text
+        _tg_post("sendMessage", payload)
+
+
+def answer_callback(callback_query_id: str, text: str | None = None) -> None:
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    _tg_post("answerCallbackQuery", payload, timeout=5)
+
+
+def edit_telegram_message(chat_id, message_id, new_text: str) -> None:
+    payload = {
+        "chat_id":    chat_id,
+        "message_id": message_id,
+        "caption":    new_text,
+        "parse_mode": "HTML",
+    }
+    ok = _tg_post("editMessageCaption", payload, timeout=5)
+    if not ok:
+        # Fallback: the original message might be plain text, not a photo caption
+        payload["text"] = payload.pop("caption")
+        _tg_post("editMessageText", payload, timeout=5)
+
+
+def delete_telegram_message(chat_id, message_id) -> None:
+    _tg_post("deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=5)
+
+
+def send_telegram_message(chat_id, text: str, keyboard=None, parse_mode: str = "HTML") -> None:
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    if keyboard:
+        payload["reply_markup"] = keyboard
+    _tg_post("sendMessage", payload, timeout=5)
+
+
+def send_telegram_photo(chat_id, photo_url: str, caption: str, keyboard=None) -> None:
+    payload = {"chat_id": chat_id, "photo": photo_url, "caption": caption, "parse_mode": "HTML"}
+    if keyboard:
+        payload["reply_markup"] = keyboard
+    _tg_post("sendPhoto", payload, timeout=5)
+
+# ---------------------------------------------------------------------------
+# HTML parsing / scraping
+# ---------------------------------------------------------------------------
+
+def extract_json_ld_price(soup: BeautifulSoup) -> float | None:
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string)
-            if isinstance(data, list):
-                for item in data:
-                    if item.get('@type') in ['Product', 'Book', 'MusicAlbum'] and 'offers' in item:
-                        offers = item['offers']
-                        if isinstance(offers, list):
-                            return float(offers[0].get('price'))
-                        return float(offers.get('price'))
-            elif isinstance(data, dict):
-                if data.get('@type') in ['Product', 'Book', 'MusicAlbum'] and 'offers' in data:
-                    offers = data['offers']
-                    if isinstance(offers, list):
-                        return float(offers[0].get('price'))
-                    return float(offers.get('price'))
-        except:
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if item.get("@type") in ("Product", "Book", "MusicAlbum") and "offers" in item:
+                    offers = item["offers"]
+                    raw = offers[0].get("price") if isinstance(offers, list) else offers.get("price")
+                    if raw is not None:
+                        return float(raw)
+        except Exception:
             continue
     return None
 
-def extract_image(soup):
-    meta_og = soup.find("meta", property="og:image")
-    if meta_og and meta_og.get("content"):
-        return meta_og["content"]
-    amz_img = soup.find("img", id="landingImage")
-    if amz_img and amz_img.get("src"):
-        return amz_img["src"]
+
+def extract_image(soup: BeautifulSoup) -> str | None:
+    meta = soup.find("meta", property="og:image")
+    if meta and meta.get("content"):
+        return meta["content"]
+    amz = soup.find("img", id="landingImage")
+    if amz and amz.get("src"):
+        return amz["src"]
     return None
 
-def scrape_amazon(soup):
-    containers = [
-        soup.find("div", id="corePriceDisplay_desktop_feature_div"),
-        soup.find("div", id="corePrice_desktop"),
-        soup.find("div", id="price_inside_buybox"),
-        soup.find("div", id="apex_desktop"),
-        soup.find("div", id="tmmSwatches")
-    ]
 
-    for container in containers:
+def scrape_amazon(soup: BeautifulSoup) -> float | None:
+    container_ids = [
+        "corePriceDisplay_desktop_feature_div",
+        "corePrice_desktop",
+        "price_inside_buybox",
+        "apex_desktop",
+        "tmmSwatches",
+    ]
+    for cid in container_ids:
+        container = soup.find("div", id=cid)
         if not container:
             continue
-        
+
         offscreen = container.find("span", class_="a-offscreen")
         if offscreen:
             val = parse_price(offscreen.text)
-            if val: return val
-            
-        whole = container.find("span", class_="a-price-whole")
+            if val:
+                return val
+
+        whole    = container.find("span", class_="a-price-whole")
         fraction = container.find("span", class_="a-price-fraction")
         if whole and fraction:
-            w_text = re.sub(r'[^\d]', '', whole.text)
-            f_text = re.sub(r'[^\d]', '', fraction.text)
-            val = parse_price(w_text + "." + f_text)
-            if val: return val
-            
+            w = re.sub(r"[^\d]", "", whole.text)
+            f = re.sub(r"[^\d]", "", fraction.text)
+            val = parse_price(f"{w}.{f}")
+            if val:
+                return val
+
         color_price = container.find("span", class_="a-color-price")
         if color_price:
             val = parse_price(color_price.text)
-            if val: return val
+            if val:
+                return val
 
-    for hid in ["attach-base-product-price", "twister-plus-price-data-price"]:
+    for hid in ("attach-base-product-price", "twister-plus-price-data-price"):
         inp = soup.find("input", id=hid)
         if inp and inp.get("value"):
-            base_val = parse_price(inp["value"])
-            if base_val: return base_val
+            val = parse_price(inp["value"])
+            if val:
+                return val
 
     return None
 
-def scrape_feltrinelli(soup):
-    json_price = extract_json_ld_price(soup)
-    if json_price:
-        return json_price
+
+def scrape_feltrinelli(soup: BeautifulSoup) -> float | None:
+    val = extract_json_ld_price(soup)
+    if val:
+        return val
 
     for script in soup.find_all("script"):
         if script.string and "price" in script.string.lower():
@@ -175,510 +244,519 @@ def scrape_feltrinelli(soup):
             if match:
                 return parse_price(match.group(1))
 
-    price_tag = soup.find("span", {"class": "price"})
-    if price_tag:
-        return parse_price(price_tag.text)
-        
+    tag = soup.find("span", class_="price")
+    if tag:
+        return parse_price(tag.text)
+
     return None
 
-def scrape_other(soup, url):
+
+def scrape_other(soup: BeautifulSoup, url: str) -> float | None:
     if "discotecalaziale" in url.lower():
-        price_div = soup.find("div", {"class": "price"})
-        if price_div:
-            val = parse_price(price_div.text)
+        div = soup.find("div", class_="price")
+        if div:
+            val = parse_price(div.text)
             if val is not None:
                 return val
 
-    json_price = extract_json_ld_price(soup)
-    if json_price:
-        return json_price
+    val = extract_json_ld_price(soup)
+    if val:
+        return val
 
-    price_elements = soup.find_all(class_=re.compile("price", re.I))
-    for el in price_elements:
+    for el in soup.find_all(class_=re.compile("price", re.I)):
         val = parse_price(el.text)
         if val is not None:
             return val
 
-    euro_pattern = re.compile(r'€\s*\d+[.,]\d{2}|\d+[.,]\d{2}\s*€')
-    match = soup.find(string=euro_pattern)
+    euro_re = re.compile(r"€\s*\d+[.,]\d{2}|\d+[.,]\d{2}\s*€")
+    match = soup.find(string=euro_re)
     if match:
-        found = euro_pattern.search(match).group()
-        return parse_price(found)
+        found = euro_re.search(match)
+        if found:
+            return parse_price(found.group())
 
     return None
 
-def get_current_data(url, site_name):
-    logger.info(f"Controllo {site_name}: {url}")
-    
-    scraper = cloudscraper.create_scraper(browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
-    })
-    
+
+def get_current_data(url: str, site_name: str) -> tuple[float | None, str | None]:
+    logger.info("Controllo %s: %s", site_name, url)
     headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "it-IT,it;q=0.8,en-US;q=0.5,en;q=0.3",
-        "Referer": "https://www.google.it/",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
+        "User-Agent":               random.choice(USER_AGENTS),
+        "Accept":                   "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language":          "it-IT,it;q=0.8,en-US;q=0.5,en;q=0.3",
+        "Referer":                  "https://www.google.it/",
+        "Connection":               "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
     }
-    
     try:
-        response = scraper.get(url, headers=headers, timeout=20)
-        soup = BeautifulSoup(response.content, "html.parser")
-        
-        page_title = soup.title.string.strip() if soup.title and soup.title.string else "Nessun titolo trovato"
-        logger.info(f"[{site_name}] Status: {response.status_code} | Titolo: {page_title}")
-        
-        image_url = extract_image(soup)
-        price = None
-        
+        response = _scraper.get(url, headers=headers, timeout=20)
+        soup     = BeautifulSoup(response.content, "html.parser")
+        title    = soup.title.string.strip() if soup.title and soup.title.string else "(nessun titolo)"
+        logger.info("[%s] HTTP %s | %s", site_name, response.status_code, title)
+
+        image_url  = extract_image(soup)
         name_lower = site_name.lower()
+
         if "amazon" in name_lower:
-            if "captcha" in page_title.lower() or page_title == "Amazon.it":
-                logger.info("BLOCCATO DA CAPTCHA AMAZON")
+            if "captcha" in title.lower() or title == "Amazon.it":
+                logger.warning("[%s] Bloccato da CAPTCHA Amazon", site_name)
                 return None, None
             price = scrape_amazon(soup)
         elif "feltrinelli" in name_lower:
             price = scrape_feltrinelli(soup)
         else:
             price = scrape_other(soup, url)
-            
-        logger.info(f"Prezzo rilevato per {site_name}: {price}")
+
+        logger.info("[%s] Prezzo rilevato: %s", site_name, format_eur(price))
         return price, image_url
-    except Exception as e:
-        logger.error(f"Errore scraping {site_name}: {url}: {e}")
+
+    except Exception as exc:
+        logger.error("Errore scraping %s (%s): %s", site_name, url, exc)
         return None, None
 
-def run_scraper():
-    logger.info("*** AVVIO PROCESSO SCRAPER ***")
-    if not supabase: return "Errore Configurazione Supabase", 500
+# ---------------------------------------------------------------------------
+# Notification message builders
+# ---------------------------------------------------------------------------
+
+def _build_buy_keyboard(lowest: dict, others: list, vinyl_id) -> list:
+    keyboard = [
+        [{"text": f"🛒 COMPRA SU {lowest['site_name'].upper()} — {format_eur(lowest['price'])}", "url": lowest["url"]}]
+    ]
+    other_btns = [{"text": p["site_name"].upper(), "url": p["url"]} for p in others]
+    for i in range(0, len(other_btns), 2):
+        keyboard.append(other_btns[i : i + 2])
+    return keyboard
+
+
+def build_initial_monitoring_message(artist: str, title: str, new_prices: list, lowest: dict) -> tuple[str, list]:
+    others = [p for p in new_prices if p["site_name"] != lowest["site_name"]]
+    msg  = f"🟢 <b>MONITORAGGIO AVVIATO</b>\n\n"
+    msg += f"<b>{artist} — {title}</b>\n\n"
+    msg += "<b>Prezzi rilevati:</b>\n"
+    for p in new_prices:
+        marker = "⭐ " if p["site_name"] == lowest["site_name"] else "   "
+        msg += f"{marker}<b>{p['site_name']}</b>: {format_eur(p['price'])}\n"
+    msg += f"\n💡 <b>Prezzo più basso:</b> {lowest['site_name']} a {format_eur(lowest['price'])}"
+
+    keyboard = _build_buy_keyboard(lowest, others, None)
+    keyboard.append([{"text": "➕ Aggiungi link", "callback_data": f"addlink_{lowest.get('vinyl_id', '')}"}])
+    keyboard.append([{"text": "📊 Statistiche",   "callback_data": f"stats_{lowest.get('vinyl_id', '')}"}])
+    return msg, keyboard
+
+
+def build_price_drop_message(artist: str, title: str, new_prices: list, lowest: dict, old_lowest: float) -> tuple[str, list]:
+    others   = [p for p in new_prices if p["site_name"] != lowest["site_name"]]
+    drop_eur = old_lowest - lowest["price"]
+    drop_pct = (drop_eur / old_lowest) * 100
+
+    msg  = f"🔥 <b>CALO DI PREZZO!</b>\n\n"
+    msg += f"<b>{artist} — {title}</b>\n\n"
+    msg += f"📉 Il prezzo minimo è sceso a <b>{format_eur(lowest['price'])}</b> su <b>{lowest['site_name']}</b>\n"
+    msg += f"💰 <b>Risparmio:</b> {format_eur(drop_eur)} ({drop_pct:.1f}% in meno)\n"
+
+    if others:
+        msg += "\n<b>Confronto con gli altri siti:</b>\n"
+        for p in others:
+            diff_pct = ((p["price"] - lowest["price"]) / lowest["price"]) * 100
+            msg += f"   <b>{p['site_name']}</b>: {format_eur(p['price'])} (+{diff_pct:.1f}%)\n"
+
+    keyboard = _build_buy_keyboard(lowest, others, None)
+    keyboard.append([{"text": "📊 Statistiche", "callback_data": f"stats_{lowest.get('vinyl_id', '')}"}])
+    keyboard.append([
+        {"text": "⏸ Sospendi", "callback_data": f"pause_{lowest.get('vinyl_id', '')}"},
+        {"text": "🗑 Elimina",  "callback_data": f"delete_{lowest.get('vinyl_id', '')}"},
+    ])
+    return msg, keyboard
+
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+
+def update_source_in_db(source: dict, new_price: float) -> None:
+    current_db_price = source.get("current_price")
+    current_ath      = source.get("ath_price")
+    source_id        = source["id"]
+
+    update_payload = {
+        "last_price":   current_db_price,
+        "current_price": new_price,
+        "updated_at":   "now()",
+    }
+    if current_ath is None or current_ath == 0 or new_price < current_ath:
+        update_payload["ath_price"] = new_price
+
+    supabase.table("sources").update(update_payload).eq("id", source_id).execute()
+
+    if current_db_price != new_price:
+        supabase.table("price_history").insert({
+            "source_id": source_id,
+            "price":     new_price,
+        }).execute()
+
+# ---------------------------------------------------------------------------
+# Core scraper logic
+# ---------------------------------------------------------------------------
+
+def process_vinyl(vinyl: dict) -> None:
+    artist    = vinyl["artist"]
+    title     = vinyl["title"]
+    cover_url = vinyl.get("cover_url")
+    sources   = vinyl.get("sources", [])
+    vinyl_id  = vinyl["id"]
+
+    if not sources:
+        return
+
+    old_prices = [s["current_price"] for s in sources if s.get("current_price") is not None]
+    old_lowest = min(old_prices) if old_prices else None
+
+    new_prices_data: list[dict] = []
+    cover_updated = False
+
+    for source in sources:
+        time.sleep(random.uniform(5, 12))
+        new_price, fetched_image = get_current_data(source["url"], source["site_name"])
+
+        if not cover_url and fetched_image and not cover_updated:
+            supabase.table("vinyls").update({"cover_url": fetched_image}).eq("id", vinyl_id).execute()
+            cover_url     = fetched_image
+            cover_updated = True
+
+        if new_price is None:
+            continue
+
+        new_prices_data.append({
+            "site_name": source["site_name"],
+            "url":       source["url"],
+            "price":     new_price,
+            "vinyl_id":  vinyl_id,
+        })
+        update_source_in_db(source, new_price)
+
+    if not new_prices_data:
+        logger.info("[%s — %s] Nessun prezzo recuperato in questo ciclo.", artist, title)
+        return
+
+    new_lowest  = min(p["price"] for p in new_prices_data)
+    lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
+
+    if old_lowest is None:
+        msg, keyboard = build_initial_monitoring_message(artist, title, new_prices_data, lowest_data)
+        send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
+        logger.info("[%s — %s] Notifica inizio monitoraggio inviata.", artist, title)
+        return
+
+    if new_lowest < old_lowest:
+        msg, keyboard = build_price_drop_message(artist, title, new_prices_data, lowest_data, old_lowest)
+        send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
+        logger.info("[%s — %s] Notifica calo prezzo inviata.", artist, title)
+
+
+def run_scraper() -> None:
+    logger.info("=== AVVIO SCRAPER ===")
+    if not supabase:
+        logger.error("Supabase non configurato. Scraper interrotto.")
+        return
 
     response = supabase.table("vinyls").select("*, sources(*)").eq("is_active", True).execute()
-    vinyls = response.data
+    vinyls   = response.data or []
+    logger.info("Vinili attivi da controllare: %d", len(vinyls))
 
     for vinyl in vinyls:
-        artist = vinyl["artist"]
-        title = vinyl["title"]
-        cover_url = vinyl.get("cover_url")
-        sources = vinyl.get("sources", [])
-        vinyl_id = vinyl["id"]
-        
-        if not sources:
-            continue
+        try:
+            process_vinyl(vinyl)
+        except Exception as exc:
+            logger.error("Errore imprevisto su vinile id=%s: %s", vinyl.get("id"), exc)
 
-        old_prices = [s["current_price"] for s in sources if s["current_price"] is not None]
-        old_lowest = min(old_prices) if old_prices else None
-        
-        new_prices_data = []
-        cover_updated = False
-        
-        for source in sources:
-            time.sleep(random.uniform(5, 12))
-            
-            new_price, fetched_image = get_current_data(source["url"], source["site_name"])
-            
-            if not cover_url and fetched_image and not cover_updated:
-                supabase.table("vinyls").update({"cover_url": fetched_image}).eq("id", vinyl_id).execute()
-                cover_url = fetched_image
-                cover_updated = True
-            
-            if new_price is not None:
-                new_prices_data.append({
-                    "site_name": source["site_name"],
-                    "url": source["url"],
-                    "price": new_price
-                })
-                
-                source_id = source["id"]
-                current_db_price = source.get("current_price")
-                current_ath = source.get("ath_price")
-                
-                update_payload = {
-                    "last_price": current_db_price,
-                    "current_price": new_price,
-                    "updated_at": "now()"
-                }
-                
-                if current_ath is None or current_ath == 0 or new_price < current_ath:
-                    update_payload["ath_price"] = new_price
-                
-                supabase.table("sources").update(update_payload).eq("id", source_id).execute()
-                
-                if current_db_price != new_price:
-                    supabase.table("price_history").insert({
-                        "source_id": source_id,
-                        "price": new_price
-                    }).execute()
+    logger.info("=== FINE SCRAPER ===")
 
-        if not new_prices_data:
-            continue
+# ---------------------------------------------------------------------------
+# Gift-list helper (used by both /start and callback)
+# ---------------------------------------------------------------------------
 
-        valid_new_prices = [p["price"] for p in new_prices_data]
-        new_lowest = min(valid_new_prices)
-        lowest_data = next(p for p in new_prices_data if p["price"] == new_lowest)
-
-        if old_lowest is None:
-            msg = f"🟢 <b>INIZIO MONITORAGGIO</b> 🟢\n\n{artist} - {title}\n\n"
-            msg += "<b>Prezzi iniziali</b>:\n"
-            for p in new_prices_data:
-                msg += f"su <b>{p['site_name']}</b>: {format_eur(p['price'])}\n"
-            
-            msg += f"\n<b>Prezzo minimo attuale:</b>\n{lowest_data['site_name']} a {format_eur(new_lowest)}"
-            
-            keyboard = []
-            keyboard.append([{"text": f"COMPRA SU {lowest_data['site_name'].upper()}", "url": lowest_data['url']}])
-            
-            other_btns = [{"text": p['site_name'].upper(), "url": p['url']} for p in new_prices_data if p['site_name'] != lowest_data['site_name']]
-            for i in range(0, len(other_btns), 2):
-                keyboard.append(other_btns[i:i+2])
-                
-            keyboard.append([{"text": "AGGIUNGI LINK", "callback_data": f"addlink_{vinyl_id}"}])
-            keyboard.append([{"text": "STATISTICHE", "callback_data": f"stats_{vinyl_id}"}])
-            
-            send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
-            logger.info(f"Notifica Inizio Monitoraggio inviata per {title}")
-            continue
-
-        if new_lowest < old_lowest:
-            drop_eur = old_lowest - new_lowest
-            drop_pct = (drop_eur / old_lowest) * 100
-            
-            msg = f"🔥 <b>CALO DI PREZZO!</b> 🔥\n\n{artist} - {title}\n\n"
-            msg += f"Il prezzo minimo è sceso a <b>{format_eur(new_lowest)}</b> su <b>{lowest_data['site_name']}</b>\n"
-            msg += f"<b>Risparmio</b>: {format_eur(drop_eur)} ({drop_pct:.1f}%)\n\n"
-            
-            for p in new_prices_data:
-                if p['site_name'] != lowest_data['site_name']:
-                    diff_pct = ((p['price'] - new_lowest) / new_lowest) * 100
-                    msg += f"prezzo su <b>{p['site_name']}</b>: {format_eur(p['price'])} (+{diff_pct:.1f}%)\n"
-                    
-            keyboard = []
-            keyboard.append([{"text": f"COMPRA SU {lowest_data['site_name'].upper()}", "url": lowest_data['url']}])
-            
-            other_btns = [{"text": p['site_name'].upper(), "url": p['url']} for p in new_prices_data if p['site_name'] != lowest_data['site_name']]
-            for i in range(0, len(other_btns), 2):
-                keyboard.append(other_btns[i:i+2])
-                
-            keyboard.append([{"text": "STATISTICHE", "callback_data": f"stats_{vinyl_id}"}])
-            keyboard.append([
-                {"text": "SOSPENDI", "callback_data": f"pause_{vinyl_id}"},
-                {"text": "ELIMINA", "callback_data": f"delete_{vinyl_id}"}
-            ])
-
-            send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
-            logger.info(f"Notifica Calo Prezzo inviata per {title}")
-
-    logger.info("*** FINE PROCESSO ***")
-    return "OK", 200
-
-def answer_callback(callback_query_id, text=None):
-    if not TELEGRAM_TOKEN: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
-    payload = {"callback_query_id": callback_query_id}
-    if text: payload["text"] = text
+def send_regali_list(chat_id) -> None:
     try:
-        cloudscraper.create_scraper().post(url, json=payload, timeout=5)
-    except Exception as e:
-        logger.error(f"Errore answerCallbackQuery: {e}")
+        res_friend = supabase.table("friends").select("name").eq("chat_id", chat_id).execute()
 
-def edit_telegram_message(chat_id, message_id, new_text):
-    if not TELEGRAM_TOKEN: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageCaption"
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "caption": new_text,
-        "parse_mode": "HTML"
-    }
-    try:
-        resp = cloudscraper.create_scraper().post(url, json=payload, timeout=5)
-        if not resp.ok:
-            url_text = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
-            payload["text"] = payload.pop("caption")
-            cloudscraper.create_scraper().post(url_text, json=payload, timeout=5)
-    except Exception as e:
-        logger.error(f"Errore edit_telegram_message: {e}")
+        if not res_friend.data:
+            supabase.table("friends").insert({"chat_id": chat_id}).execute()
+            nome = None
+        else:
+            nome = res_friend.data[0].get("name")
 
-def get_site_name_from_url(url):
-    url_lower = url.lower()
-    if "amazon" in url_lower: return "Amazon"
-    if "feltrinelli" in url_lower: return "Feltrinelli"
-    if "discotecalaziale" in url_lower: return "Discoteca Laziale"
-    if "ibs" in url_lower: return "IBS"
-    return "Altro"
+        if nome:
+            text = (
+                f"Ciao, <b>{nome}</b>! 🎁\n\n"
+                "Ecco la lista aggiornata dei vinili:"
+            )
+        else:
+            text = (
+                "Ciao! 👋 Grazie per avermi chiesto cosa vorrei per regalo!\n\n"
+                "Questa è la lista dei vinili che mi piacerebbe tanto avere. "
+                "Se decidi di regalarmene uno, cliccaci sopra e prenotalo: in questo modo "
+                "verrà nascosto agli altri, così non riceverò regali doppi. ✨💿✨\n\n"
+                "I prezzi che vedi sono i più bassi trovati online dal mio bot (potrebbero "
+                "esserci piccole variazioni nel momento in cui clicchi), ma sentiti "
+                "liberissim* di comprarlo dove preferisci, anche usato o dal tuo negozio "
+                "di fiducia. E ovviamente, se hai un'altra idea al di fuori di questa lista, "
+                "mi renderai ugualmente felicissima! ❤️"
+            )
 
-@app.route('/webhook', methods=['POST'])
+        res_vinyls = supabase.table("vinyls").select(
+            "id, artist, title, reserved_by, sources(current_price)"
+        ).or_(f"is_active.eq.true,reserved_by.eq.{chat_id}").execute()
+
+        vinyls = sorted(
+            res_vinyls.data or [],
+            key=lambda x: (
+                min(
+                    (s["current_price"] for s in x.get("sources", []) if s.get("current_price") is not None),
+                    default=float("inf"),
+                ),
+                x.get("artist", "").lower(),
+                x.get("title", "").lower(),
+            ),
+        )
+
+        keyboard = []
+        for v in vinyls:
+            prices       = [s["current_price"] for s in v.get("sources", []) if s.get("current_price") is not None]
+            lowest_price = min(prices) if prices else None
+            price_str    = f" — {format_eur(lowest_price)}" if lowest_price else ""
+            is_mine      = str(v.get("reserved_by")) == str(chat_id)
+            icon         = "✅" if is_mine else "💿"
+            btn_text     = f"{icon} {v['artist']} — {v['title']}{price_str}"
+            keyboard.append([{"text": btn_text, "callback_data": f"regalo_{v['id']}"}])
+
+        if not keyboard:
+            text += "\n\nAl momento non ci sono vinili in lista."
+
+        send_telegram_message(
+            chat_id,
+            text,
+            keyboard={"inline_keyboard": keyboard} if keyboard else None,
+        )
+
+    except Exception as exc:
+        logger.error("Errore generazione lista regali: %s", exc)
+
+# ---------------------------------------------------------------------------
+# Flask routes
+# ---------------------------------------------------------------------------
+
+@app.route("/trigger", methods=["GET"])
+def trigger():
+    token = request.args.get("token")
+    if token != SCRAPER_TOKEN:
+        return "Non autorizzato", 401
+
+    thread = threading.Thread(target=run_scraper, daemon=True)
+    thread.start()
+    return "Scraper avviato in background", 200
+
+
+@app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    update = request.get_json()
+    update = request.get_json(silent=True)
     if not update:
         return "OK", 200
 
-    def send_regali_list(chat_id):
-        try:
-            res_friend = supabase.table("friends").select("nome").eq("chat_id", chat_id).execute()
-            
-            if not res_friend.data:
-                supabase.table("friends").insert({"chat_id": chat_id}).execute()
-                nome = None
-            else:
-                nome = res_friend.data[0].get("nome")
-
-            if nome:
-                text = f"Bentornato/a {nome}! 🎁\n\nQuesta è la lista aggiornata dei vinili:"
-            else:
-                text = (
-                    "Ciao! 👋 Che bello vederti qui.\n\n"
-                    "Questa è una lista dei vinili che mi piacerebbe tanto avere. "
-                    "Se decidi di regalarmene uno, cliccaci sopra e prenotalo: in questo modo "
-                    "verrà nascosto agli altri e non riceverò regali doppi. ✨💿✨\n\n"
-                    "I prezzi che vedi sono i più bassi trovati online dal mio bot (potrebbero esserci piccole variazioni nel momento in cui clicchi), ma sentiti "
-                    "liberissim* di comprarli dove preferisci, anche usati o dal tuo negozio "
-                    "di dischi di fiducia. E ovviamente, se hai un'altra idea fuori da questa lista, "
-                    "mi renderai comunque felicissima!\n\n"
-                    "Grazie di cuore! ❤️"
-                )
-
-            res_vinyls = supabase.table("vinyls").select(
-                "id, artist, title, reserved_by, sources(current_price)"
-            ).or_(f"is_active.eq.true,reserved_by.eq.{chat_id}").execute()
-            
-            # Ordinamento alfabetico per artista e titolo
-            display_vinyls = sorted( res_vinyls.data or [], key=lambda x: ( min([s.get("current_price") for s in x.get("sources", []) if s.get("current_price") is not None] or [float('inf')]),
-                                x.get("artist", "").lower(), x.get("title", "").lower()))
-
-            keyboard = []
-            for v in display_vinyls:
-                prices = [s["current_price"] for s in v.get("sources", []) if s.get("current_price") is not None]
-                lowest_price = min(prices) if prices else None
-                price_str = f" - {format_eur(lowest_price)}" if lowest_price else ""
-                
-                is_mine = str(v.get("reserved_by")) == str(chat_id)
-                icon = "✅" if is_mine else "💿"
-                
-                btn_text = f"{icon} {v['artist']} - {v['title']}{price_str} {icon}"
-                keyboard.append([{"text": btn_text, "callback_data": f"regalo_{v['id']}"}])
-
-            if not keyboard:
-                text += "\n\nAl momento non ci sono vinili in lista."
-
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML"
-            }
-            if keyboard:
-                payload["reply_markup"] = {"inline_keyboard": keyboard}
-                
-            cloudscraper.create_scraper().post(url, json=payload, timeout=5)
-            
-        except Exception as e:
-            logger.error(f"Errore generazione lista regali: {e}")
-
+    # ---- Plain messages ----
     if "message" in update:
-        msg = update["message"]
-        chat_id = msg.get("chat", {}).get("id")
-        text = msg.get("text", "")
-        reply_to = msg.get("reply_to_message")
-        
-        if text.strip() in ["/start regali", "/regali"]:
-            send_regali_list(chat_id)
-            return "OK", 200
-            
-        if reply_to and reply_to.get("text") and "[ID_VINILE:" in reply_to["text"]:
-            try:
-                record_id = reply_to["text"].split("[ID_VINILE:")[1].split("]")[0]
-            except Exception:
-                return "OK", 200
+        _handle_message(update["message"])
 
-            url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            
-            if "http" not in text:
-                payload = {"chat_id": chat_id, "text": "Errore: Inserisci un link valido che inizi con http/https."}
-                cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
-                return "OK", 200
-
-            site_name = get_site_name_from_url(text)
-
-            try:
-                supabase.table("sources").insert({
-                    "vinyl_id": record_id,
-                    "site_name": site_name,
-                    "url": text
-                }).execute()
-                
-                payload = {"chat_id": chat_id, "text": f"Link di {site_name} aggiunto con successo al database!"}
-            except Exception as e:
-                logger.error(f"Errore inserimento link DB: {e}")
-                payload = {"chat_id": chat_id, "text": "Errore di salvataggio nel database."}
-                
-            cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
-            return "OK", 200
-
+    # ---- Button callbacks ----
     if "callback_query" in update:
-        cb = update["callback_query"]
-        cb_id = cb["id"]
-        data = cb.get("data", "")
-        msg = cb.get("message", {})
-        chat_id = msg.get("chat", {}).get("id")
-        msg_id = msg.get("message_id")
-        
-        if not data or not supabase:
-            answer_callback(cb_id, "Errore di sistema.")
-            return "OK", 200
+        _handle_callback(update["callback_query"])
 
-        action, record_id = data.split("_", 1)
-        
-        if action == "pause":
-            supabase.table("vinyls").update({"is_active": False}).eq("id", record_id).execute()
-            answer_callback(cb_id, "Monitoraggio sospeso")
-            if chat_id and msg_id:
-                edit_telegram_message(chat_id, msg_id, "<b>MONITORAGGIO SOSPESO</b>\nRicevuto! Non ti invierò più notifiche per questo vinile.")
-
-        elif action == "delete":
-            supabase.table("vinyls").delete().eq("id", record_id).execute()
-            answer_callback(cb_id, "Vinile eliminato dal DB")
-            if chat_id and msg_id:
-                edit_telegram_message(chat_id, msg_id, "<b>VINILE ELIMINATO</b>\nIl vinile e tutti i suoi link sono stati rimossi dal database.")
-    
-        elif action == "stats":
-            answer_callback(cb_id, "Elaborazione in corso...")
-            try:
-                res = supabase.table("vinyls").select("artist, title, sources(site_name, current_price, ath_price)").eq("id", record_id).execute()
-                if res.data and res.data[0].get("sources"):
-                    v = res.data[0]
-                    stats_msg = f"<b>📊 STATISTICHE 📊 \n {v['artist']} - {v['title']}</b>\n\n"
-                    
-                    for s in v["sources"]:
-                        cp = s.get("current_price")
-                        ath = s.get("ath_price")
-                        stats_msg += f"<b>{s['site_name']}</b>\n"
-                        stats_msg += f"Attuale: {format_eur(cp)}\n"
-                        stats_msg += f"Minimo storico: {format_eur(ath)}\n\n"
-                    
-                    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                    
-                    keyboard = {
-                        "inline_keyboard": [
-                            [{"text": "AGGIUNGI LINK", "callback_data": f"addlink_{record_id}"}]
-                        ]
-                    }
-                    
-                    payload = {
-                        "chat_id": chat_id, 
-                        "text": stats_msg, 
-                        "parse_mode": "HTML",
-                        "reply_markup": keyboard
-                    }
-                    cloudscraper.create_scraper().post(url, json=payload, timeout=5)
-            except Exception as e:
-                logger.error(f"Errore statistiche: {e}")
-                
-        elif action == "addlink":
-            answer_callback(cb_id, "In attesa del link...")
-            url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": chat_id,
-                "text": f"Incolla il link da aggiungere rispondendo a questo messaggio.\n[ID_VINILE:{record_id}]",
-                "reply_markup": {"force_reply": True}
-            }
-            cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
-
-        elif action == "listaregali":
-            answer_callback(cb_id)
-            # Elimina il messaggio attuale prima di mandare la lista nuova, previene conflitti foto/testo
-            url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
-            cloudscraper.create_scraper().post(url_delete, json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
-            send_regali_list(chat_id)
-
-        elif action in ["book", "unbook"]:
-            answer_callback(cb_id) # Chiude la rotellina di caricamento in alto
-            
-            if action == "book":
-                check_v = supabase.table("vinyls").select("reserved_by").eq("id", record_id).execute()
-                if check_v.data and check_v.data[0].get("reserved_by") is not None:
-                    msg_testo = "Ops! Qualcuno è stato più veloce e l'ha già prenotato! 😅"
-                else:
-                    supabase.table("vinyls").update({"is_active": False, "reserved_by": str(chat_id)}).eq("id", record_id).execute()
-                    msg_testo = "Vinile prenotato con successo! 🎉\n\nGrazie!"
-            else:
-                supabase.table("vinyls").update({"is_active": True, "reserved_by": None}).eq("id", record_id).execute()
-                msg_testo = "Prenotazione annullata. Il vinile è tornato disponibile nella lista! 💿"
-
-            url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
-            cloudscraper.create_scraper().post(url_delete, json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
-            
-            url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-            payload = {
-                "chat_id": chat_id,
-                "text": msg_testo,
-                "reply_markup": {"inline_keyboard": [[{"text": "🔙 Torna alla Lista", "callback_data": "listaregali_0"}]]}
-            }
-            cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
-
-        elif action == "regalo":
-            answer_callback(cb_id, "Recupero dettagli...")
-            try:
-                res = supabase.table("vinyls").select("artist, title, cover_url, reserved_by, sources(site_name, current_price, url)").eq("id", record_id).execute()
-                if res.data:
-                    v = res.data[0]
-                    
-                    is_mine = str(v.get("reserved_by")) == str(chat_id)
-                    is_available = v.get("reserved_by") is None
-                    
-                    msg_text = f"<b>{v['artist']} - {v['title']}</b>\n\n"
-                    
-                    if is_mine:
-                        msg_text += "<i>✅ Hai prenotato questo vinile! ✅</i>\n\n"
-                    elif not is_available:
-                        msg_text += "<i>❌ Questo vinile è già stato prenotato da qualcun altro. ❌</i>\n\n"
-                    
-                    keyboard = []
-                    
-                    if not v.get("sources"):
-                        msg_text += "Nessun prezzo disponibile al momento.\n\n"
-                    else:
-                        for s in v["sources"]:
-                            cp = s.get("current_price")
-                            msg_text += f"<b>{s['site_name']}</b>: {format_eur(cp)}\n"
-                            if cp is not None and s.get("url"):
-                                keyboard.append([{"text": f"💸 COMPRA SU {s['site_name'].upper()}", "url": s['url']}])
-                    
-                    if is_mine:
-                        keyboard.append([{"text": "❌ Cancella Prenotazione ❌", "callback_data": f"unbook_{record_id}"}])
-                    elif is_available:
-                        keyboard.append([{"text": "🎁 Prenota Vinile 🎁", "callback_data": f"book_{record_id}"}])
-
-                    keyboard.append([{"text": "🔙 Torna alla Lista", "callback_data": "listaregali_0"}])
-                    
-                    payload = {
-                        "chat_id": chat_id,
-                        "text": msg_text,
-                        "parse_mode": "HTML",
-                        "reply_markup": {"inline_keyboard": keyboard}
-                    }
-                    
-                    # Elimino il messaggio precedente per evitare problemi tra testo semplice e foto
-                    url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
-                    cloudscraper.create_scraper().post(url_delete, json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
-                    
-                    if v.get("cover_url"):
-                        url_photo = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-                        payload["photo"] = v["cover_url"]
-                        payload["caption"] = payload.pop("text")
-                        cloudscraper.create_scraper().post(url_photo, json=payload, timeout=5)
-                    else:
-                        url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                        cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
-                        
-            except Exception as e:
-                logger.error(f"Errore dettaglio regalo: {e}")
-                
     return "OK", 200
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+
+def _handle_message(msg: dict) -> None:
+    chat_id  = msg.get("chat", {}).get("id")
+    text     = msg.get("text", "").strip()
+    reply_to = msg.get("reply_to_message")
+
+    if text in ("/start regali", "/regali"):
+        send_regali_list(chat_id)
+        return
+
+    # Reply-to flow: user is pasting a URL for a vinyl
+    if reply_to and reply_to.get("text") and "[ID_VINILE:" in reply_to.get("text", ""):
+        try:
+            record_id = reply_to["text"].split("[ID_VINILE:")[1].split("]")[0]
+        except (IndexError, KeyError):
+            return
+
+        if not text.startswith("http"):
+            send_telegram_message(chat_id, "⚠️ Inserisci un link valido che inizi con http o https.")
+            return
+
+        site_name = get_site_name_from_url(text)
+        try:
+            supabase.table("sources").insert({"vinyl_id": record_id, "site_name": site_name, "url": text}).execute()
+            send_telegram_message(chat_id, f"✅ Link di <b>{site_name}</b> aggiunto con successo!")
+        except Exception as exc:
+            logger.error("Errore inserimento link DB: %s", exc)
+            send_telegram_message(chat_id, "❌ Errore nel salvare il link. Riprova più tardi.")
+
+
+def _handle_callback(cb: dict) -> None:
+    cb_id     = cb["id"]
+    data      = cb.get("data", "")
+    msg       = cb.get("message", {})
+    chat_id   = msg.get("chat", {}).get("id")
+    msg_id    = msg.get("message_id")
+
+    if not data or not supabase:
+        answer_callback(cb_id, "Errore di sistema.")
+        return
+
+    parts = data.split("_", 1)
+    if len(parts) != 2:
+        answer_callback(cb_id, "Azione non riconosciuta.")
+        return
+
+    action, record_id = parts
+
+    if action == "pause":
+        supabase.table("vinyls").update({"is_active": False}).eq("id", record_id).execute()
+        answer_callback(cb_id, "Monitoraggio sospeso.")
+        edit_telegram_message(
+            chat_id, msg_id,
+            "⏸ <b>MONITORAGGIO SOSPESO</b>\n\nNon riceverai più notifiche per questo vinile. "
+            "Puoi riattivarlo direttamente dal database quando vuoi."
+        )
+
+    elif action == "delete":
+        supabase.table("vinyls").delete().eq("id", record_id).execute()
+        answer_callback(cb_id, "Vinile eliminato.")
+        edit_telegram_message(
+            chat_id, msg_id,
+            "🗑 <b>VINILE ELIMINATO</b>\n\nIl vinile e tutti i suoi link sono stati rimossi dal database."
+        )
+
+    elif action == "stats":
+        answer_callback(cb_id, "Recupero statistiche…")
+        try:
+            res = supabase.table("vinyls").select(
+                "artist, title, sources(site_name, current_price, ath_price)"
+            ).eq("id", record_id).execute()
+
+            if not res.data or not res.data[0].get("sources"):
+                send_telegram_message(chat_id, "📊 Nessuna statistica disponibile al momento.")
+                return
+
+            v        = res.data[0]
+            stats_msg = f"📊 <b>STATISTICHE</b>\n<b>{v['artist']} — {v['title']}</b>\n\n"
+            for s in v["sources"]:
+                stats_msg += (
+                    f"<b>{s['site_name']}</b>\n"
+                    f"   Prezzo attuale:    {format_eur(s.get('current_price'))}\n"
+                    f"   Minimo storico:    {format_eur(s.get('ath_price'))}\n\n"
+                )
+
+            send_telegram_message(
+                chat_id, stats_msg,
+                keyboard={"inline_keyboard": [[{"text": "➕ Aggiungi link", "callback_data": f"addlink_{record_id}"}]]},
+            )
+        except Exception as exc:
+            logger.error("Errore recupero statistiche: %s", exc)
+            send_telegram_message(chat_id, "❌ Errore nel recupero delle statistiche. Riprova più tardi.")
+
+    elif action == "addlink":
+        answer_callback(cb_id, "In attesa del link…")
+        send_telegram_message(
+            chat_id,
+            f"📎 Incolla il link da aggiungere <b>rispondendo a questo messaggio</b>.\n[ID_VINILE:{record_id}]",
+            keyboard={"force_reply": True},
+        )
+
+    elif action == "listaregali":
+        answer_callback(cb_id)
+        delete_telegram_message(chat_id, msg_id)
+        send_regali_list(chat_id)
+
+    elif action in ("book", "unbook"):
+        answer_callback(cb_id)
+
+        if action == "book":
+            check = supabase.table("vinyls").select("reserved_by").eq("id", record_id).execute()
+            if check.data and check.data[0].get("reserved_by") is not None:
+                msg_testo = "😅 Ops! Qualcuno è stato più veloce e l'ha già prenotato."
+            else:
+                supabase.table("vinyls").update(
+                    {"is_active": False, "reserved_by": str(chat_id)}
+                ).eq("id", record_id).execute()
+                msg_testo = "🎉 Vinile prenotato con successo!\n\nGrazie mille, sei fantastico/a! ❤️"
+        else:
+            supabase.table("vinyls").update(
+                {"is_active": True, "reserved_by": None}
+            ).eq("id", record_id).execute()
+            msg_testo = "↩️ Prenotazione annullata. Il vinile è tornato disponibile nella lista."
+
+        delete_telegram_message(chat_id, msg_id)
+        send_telegram_message(
+            chat_id, msg_testo,
+            keyboard={"inline_keyboard": [[{"text": "🔙 Torna alla lista", "callback_data": "listaregali_0"}]]},
+        )
+
+    elif action == "regalo":
+        answer_callback(cb_id, "Recupero dettagli…")
+        try:
+            res = supabase.table("vinyls").select(
+                "artist, title, cover_url, reserved_by, sources(site_name, current_price, url)"
+            ).eq("id", record_id).execute()
+
+            if not res.data:
+                send_telegram_message(chat_id, "⚠️ Vinile non trovato.")
+                return
+
+            v           = res.data[0]
+            is_mine     = str(v.get("reserved_by")) == str(chat_id)
+            is_available = v.get("reserved_by") is None
+
+            caption = f"<b>{v['artist']} — {v['title']}</b>\n\n"
+            if is_mine:
+                caption += "✅ <i>Hai prenotato questo vinile.</i>\n\n"
+            elif not is_available:
+                caption += "❌ <i>Questo vinile è già stato prenotato da qualcun altro.</i>\n\n"
+
+            keyboard = []
+            sources  = v.get("sources") or []
+
+            if not sources:
+                caption += "Nessun prezzo disponibile al momento.\n"
+            else:
+                for s in sources:
+                    cp = s.get("current_price")
+                    caption += f"<b>{s['site_name']}</b>: {format_eur(cp)}\n"
+                    if cp is not None and s.get("url"):
+                        keyboard.append([{"text": f"💸 Compra su {s['site_name']}", "url": s["url"]}])
+
+            if is_mine:
+                keyboard.append([{"text": "❌ Cancella prenotazione", "callback_data": f"unbook_{record_id}"}])
+            elif is_available:
+                keyboard.append([{"text": "🎁 Prenota questo vinile", "callback_data": f"book_{record_id}"}])
+
+            keyboard.append([{"text": "🔙 Torna alla lista", "callback_data": "listaregali_0"}])
+            reply_markup = {"inline_keyboard": keyboard}
+
+            delete_telegram_message(chat_id, msg_id)
+
+            if v.get("cover_url"):
+                send_telegram_photo(chat_id, v["cover_url"], caption, reply_markup)
+            else:
+                send_telegram_message(chat_id, caption, reply_markup)
+
+        except Exception as exc:
+            logger.error("Errore dettaglio regalo: %s", exc)
+            send_telegram_message(chat_id, "❌ Si è verificato un errore. Riprova tra poco.")
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
