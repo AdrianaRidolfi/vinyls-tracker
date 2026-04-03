@@ -416,37 +416,38 @@ def telegram_webhook():
     if not update:
         return "OK", 200
 
-    # Helper function per generare e inviare la lista regali
-    def send_regali_list(chat_id, message_id=None):
+    def send_regali_list(chat_id):
         try:
-            # Controllo se l'utente esiste e se ha un nome
-            res_friend = supabase.table("friends").select("name").eq("chat_id", chat_id).execute()
+            res_friend = supabase.table("friends").select("nome").eq("chat_id", chat_id).execute()
             
             if not res_friend.data:
                 supabase.table("friends").insert({"chat_id": chat_id}).execute()
                 nome = None
             else:
-                nome = res_friend.data[0].get("name")
+                nome = res_friend.data[0].get("nome")
 
             if nome:
-                text = f"Bentornato/a {nome}! 🎁\n\nEcco i vinili attualmente in lista:"
+                text = f"Bentornato/a {nome}! 🎁\n\nQuesta è la lista aggiornata dei vinili:"
             else:
                 text = (
-                    "Ciao! 👋 Se sei qui è perché mi hai chiesto cosa vorrei in regalo.\n\n"
-                    "Questa è una lista dei vinili che sto puntando. Puoi prenotarne uno cliccandoci sopra, "
-                    "così viene rimosso dalla lista pubblica e non ricevo doppioni.\n\n"
-                    "I prezzi che vedi sono i più bassi trovati online al momento, ma non devi per forza "
-                    "comprarli nuovi o usare i link forniti. Se li trovi usati o nel tuo negozietto di fiducia "
-                    "tanto di cappello! E se vuoi farmi un regalo che non vedi in questa lista, va più che bene. 💿✨\n\n"
-                    "Grazie mille! ❤️"
+                    "Ciao! 👋 Che bello vederti qui.\n\n"
+                    "Questa è una lista dei vinili che mi piacerebbe tanto avere. "
+                    "Se decidi di regalarmene uno, cliccaci sopra e prenotalo: in questo modo "
+                    "verrà nascosto agli altri e non riceverò regali doppi. ✨💿✨\n\n"
+                    "I prezzi che vedi sono i più bassi trovati online dal mio bot (potrebbero esserci piccole variazioni nel momento in cui clicchi), ma sentiti "
+                    "liberissim* di comprarli dove preferisci, anche usati o dal tuo negozio "
+                    "di dischi di fiducia. E ovviamente, se hai un'altra idea fuori da questa lista, "
+                    "mi renderai comunque felicissima!\n\n"
+                    "Grazie di cuore! ❤️"
                 )
 
-            # Prende i vinili attivi OPPURE quelli prenotati da questo specifico utente
             res_vinyls = supabase.table("vinyls").select(
                 "id, artist, title, reserved_by, sources(current_price)"
             ).or_(f"is_active.eq.true,reserved_by.eq.{chat_id}").execute()
             
-            display_vinyls = res_vinyls.data or []
+            # Ordinamento alfabetico per artista e titolo
+            display_vinyls = sorted( res_vinyls.data or [], key=lambda x: ( min([s.get("current_price") for s in x.get("sources", []) if s.get("current_price") is not None] or [float('inf')]),
+                                x.get("artist", "").lower(), x.get("title", "").lower()))
 
             keyboard = []
             for v in display_vinyls:
@@ -457,12 +458,13 @@ def telegram_webhook():
                 is_mine = str(v.get("reserved_by")) == str(chat_id)
                 icon = "✅" if is_mine else "💿"
                 
-                btn_text = f"{icon} {v['artist']} - {v['title']}{price_str}"
+                btn_text = f"{icon} {v['artist']} - {v['title']}{price_str} {icon}"
                 keyboard.append([{"text": btn_text, "callback_data": f"regalo_{v['id']}"}])
 
             if not keyboard:
                 text += "\n\nAl momento non ci sono vinili in lista."
 
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
             payload = {
                 "chat_id": chat_id,
                 "text": text,
@@ -470,12 +472,6 @@ def telegram_webhook():
             }
             if keyboard:
                 payload["reply_markup"] = {"inline_keyboard": keyboard}
-
-            if message_id:
-                payload["message_id"] = message_id
-                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
-            else:
-                url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
                 
             cloudscraper.create_scraper().post(url, json=payload, timeout=5)
             
@@ -593,25 +589,35 @@ def telegram_webhook():
 
         elif action == "listaregali":
             answer_callback(cb_id)
-            send_regali_list(chat_id, msg_id)
+            # Elimina il messaggio attuale prima di mandare la lista nuova, previene conflitti foto/testo
+            url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
+            cloudscraper.create_scraper().post(url_delete, json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
+            send_regali_list(chat_id)
 
-        elif action == "book":
-            # Controllo anti-ninja: vediamo se qualcuno lo ha prenotato un attimo prima
-            check_v = supabase.table("vinyls").select("reserved_by").eq("id", record_id).execute()
-            if check_v.data and check_v.data[0].get("reserved_by") is not None:
-                answer_callback(cb_id, "Qualcuno è stato più veloce, mi spiace! 😅")
-                send_regali_list(chat_id, msg_id)
-                return "OK", 200
+        elif action in ["book", "unbook"]:
+            answer_callback(cb_id) # Chiude la rotellina di caricamento in alto
+            
+            if action == "book":
+                check_v = supabase.table("vinyls").select("reserved_by").eq("id", record_id).execute()
+                if check_v.data and check_v.data[0].get("reserved_by") is not None:
+                    msg_testo = "Ops! Qualcuno è stato più veloce e l'ha già prenotato! 😅"
+                else:
+                    supabase.table("vinyls").update({"is_active": False, "reserved_by": str(chat_id)}).eq("id", record_id).execute()
+                    msg_testo = "Vinile prenotato con successo! 🎉\n\nGrazie!"
+            else:
+                supabase.table("vinyls").update({"is_active": True, "reserved_by": None}).eq("id", record_id).execute()
+                msg_testo = "Prenotazione annullata. Il vinile è tornato disponibile nella lista! 💿"
 
-            supabase.table("vinyls").update({"is_active": False, "reserved_by": str(chat_id)}).eq("id", record_id).execute()
-            answer_callback(cb_id, "Vinile prenotato con successo! 🎉")
-            send_regali_list(chat_id, msg_id)
-
-        elif action == "unbook":
-            # Lo rimettiamo attivo e togliamo il reserved_by
-            supabase.table("vinyls").update({"is_active": True, "reserved_by": None}).eq("id", record_id).execute()
-            answer_callback(cb_id, "Prenotazione annullata!")
-            send_regali_list(chat_id, msg_id)
+            url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
+            cloudscraper.create_scraper().post(url_delete, json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
+            
+            url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": chat_id,
+                "text": msg_testo,
+                "reply_markup": {"inline_keyboard": [[{"text": "🔙 Torna alla Lista", "callback_data": "listaregali_0"}]]}
+            }
+            cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
 
         elif action == "regalo":
             answer_callback(cb_id, "Recupero dettagli...")
@@ -626,9 +632,9 @@ def telegram_webhook():
                     msg_text = f"<b>{v['artist']} - {v['title']}</b>\n\n"
                     
                     if is_mine:
-                        msg_text += "<i>✅ Hai prenotato questo vinile!</i>\n\n"
+                        msg_text += "<i>✅ Hai prenotato questo vinile! ✅</i>\n\n"
                     elif not is_available:
-                        msg_text += "<i>❌ Questo vinile è già stato prenotato da qualcun altro.</i>\n\n"
+                        msg_text += "<i>❌ Questo vinile è già stato prenotato da qualcun altro. ❌</i>\n\n"
                     
                     keyboard = []
                     
@@ -642,9 +648,9 @@ def telegram_webhook():
                                 keyboard.append([{"text": f"💸 COMPRA SU {s['site_name'].upper()}", "url": s['url']}])
                     
                     if is_mine:
-                        keyboard.append([{"text": "❌ Cancella Prenotazione", "callback_data": f"unbook_{record_id}"}])
+                        keyboard.append([{"text": "❌ Cancella Prenotazione ❌", "callback_data": f"unbook_{record_id}"}])
                     elif is_available:
-                        keyboard.append([{"text": "🎁 Prenota Vinile", "callback_data": f"book_{record_id}"}])
+                        keyboard.append([{"text": "🎁 Prenota Vinile 🎁", "callback_data": f"book_{record_id}"}])
 
                     keyboard.append([{"text": "🔙 Torna alla Lista", "callback_data": "listaregali_0"}])
                     
@@ -655,20 +661,18 @@ def telegram_webhook():
                         "reply_markup": {"inline_keyboard": keyboard}
                     }
                     
+                    # Elimino il messaggio precedente per evitare problemi tra testo semplice e foto
+                    url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
+                    cloudscraper.create_scraper().post(url_delete, json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
+                    
                     if v.get("cover_url"):
                         url_photo = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
                         payload["photo"] = v["cover_url"]
                         payload["caption"] = payload.pop("text")
-                        
                         cloudscraper.create_scraper().post(url_photo, json=payload, timeout=5)
-                        
-                        # Rimuove il vecchio messaggio con la lista
-                        url_delete = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
-                        cloudscraper.create_scraper().post(url_delete, json={"chat_id": chat_id, "message_id": msg_id}, timeout=5)
                     else:
-                        payload["message_id"] = msg_id
-                        url_edit = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
-                        cloudscraper.create_scraper().post(url_edit, json=payload, timeout=5)
+                        url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                        cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
                         
             except Exception as e:
                 logger.error(f"Errore dettaglio regalo: {e}")
