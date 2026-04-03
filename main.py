@@ -320,7 +320,7 @@ def get_current_data(url: str, site_name: str) -> tuple[float | None, str | None
 
 def _build_buy_keyboard(lowest: dict, others: list, vinyl_id) -> list:
     keyboard = [
-        [{"text": f"🛒 COMPRA SU {lowest['site_name'].upper()} — {format_eur(lowest['price'])}", "url": lowest["url"]}]
+        [{"text": f"🛒 COMPRA SU {lowest['site_name'].upper()} - {format_eur(lowest['price'])}", "url": lowest["url"]}]
     ]
     other_btns = [{"text": p["site_name"].upper(), "url": p["url"]} for p in others]
     for i in range(0, len(other_btns), 2):
@@ -330,8 +330,8 @@ def _build_buy_keyboard(lowest: dict, others: list, vinyl_id) -> list:
 
 def build_initial_monitoring_message(artist: str, title: str, new_prices: list, lowest: dict) -> tuple[str, list]:
     others = [p for p in new_prices if p["site_name"] != lowest["site_name"]]
-    msg  = f"🟢 <b>MONITORAGGIO AVVIATO</b>\n\n"
-    msg += f"<b>{artist} — {title}</b>\n\n"
+    msg  = "🟢 <b>MONITORAGGIO AVVIATO</b>\n\n"
+    msg += f"<b>{artist} - {title}</b>\n\n"
     msg += "<b>Prezzi rilevati:</b>\n"
     for p in new_prices:
         marker = "⭐ " if p["site_name"] == lowest["site_name"] else "   "
@@ -349,8 +349,8 @@ def build_price_drop_message(artist: str, title: str, new_prices: list, lowest: 
     drop_eur = old_lowest - lowest["price"]
     drop_pct = (drop_eur / old_lowest) * 100
 
-    msg  = f"🔥 <b>CALO DI PREZZO!</b>\n\n"
-    msg += f"<b>{artist} — {title}</b>\n\n"
+    msg  = "🔥 <b>CALO DI PREZZO!</b>\n\n"
+    msg += f"<b>{artist} - {title}</b>\n\n"
     msg += f"📉 Il prezzo minimo è sceso a <b>{format_eur(lowest['price'])}</b> su <b>{lowest['site_name']}</b>\n"
     msg += f"💰 <b>Risparmio:</b> {format_eur(drop_eur)} ({drop_pct:.1f}% in meno)\n"
 
@@ -434,7 +434,7 @@ def process_vinyl(vinyl: dict) -> None:
         update_source_in_db(source, new_price)
 
     if not new_prices_data:
-        logger.info("[%s — %s] Nessun prezzo recuperato in questo ciclo.", artist, title)
+        logger.info("[%s - %s] Nessun prezzo recuperato in questo ciclo.", artist, title)
         return
 
     new_lowest  = min(p["price"] for p in new_prices_data)
@@ -443,13 +443,13 @@ def process_vinyl(vinyl: dict) -> None:
     if old_lowest is None:
         msg, keyboard = build_initial_monitoring_message(artist, title, new_prices_data, lowest_data)
         send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
-        logger.info("[%s — %s] Notifica inizio monitoraggio inviata.", artist, title)
+        logger.info("[%s - %s] Notifica inizio monitoraggio inviata.", artist, title)
         return
 
     if new_lowest < old_lowest:
         msg, keyboard = build_price_drop_message(artist, title, new_prices_data, lowest_data, old_lowest)
         send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
-        logger.info("[%s — %s] Notifica calo prezzo inviata.", artist, title)
+        logger.info("[%s - %s] Notifica calo prezzo inviata.", artist, title)
 
 
 def run_scraper() -> None:
@@ -486,15 +486,15 @@ def send_regali_list(chat_id) -> None:
 
         if nome:
             text = (
-                f"Ciao, <b>{nome}</b>! 🎁\n\n"
+                f"Bentornato/a, <b>{nome}</b>! 🎁\n\n"
                 "Ecco la lista aggiornata dei vinili:"
             )
         else:
             text = (
-                "Ciao! 👋 Grazie per avermi chiesto cosa vorrei per regalo!\n\n"
+                "Ciao! 👋 Benvenuto/a qui.\n\n"
                 "Questa è la lista dei vinili che mi piacerebbe tanto avere. "
                 "Se decidi di regalarmene uno, cliccaci sopra e prenotalo: in questo modo "
-                "verrà nascosto agli altri, così non riceverò regali doppi. ✨💿✨\n"
+                "verrà nascosto agli altri, così non riceverò regali doppi. ✨💿✨\n\n"
                 "I prezzi che vedi sono i più bassi trovati online dal mio bot (potrebbero "
                 "esserci piccole variazioni nel momento in cui clicchi), ma sentiti "
                 "liberissim* di comprarlo dove preferisci, anche usato o dal tuo negozio "
@@ -524,8 +524,8 @@ def send_regali_list(chat_id) -> None:
             lowest_price = min(prices) if prices else None
             price_str    = f" - {format_eur(lowest_price)}" if lowest_price else ""
             is_mine      = str(v.get("reserved_by")) == str(chat_id)
-            icon         = "✅" if is_mine else "💿"
-            btn_text     = f"{icon} {v['artist']} {v['title']}{price_str}"
+            check        = "✅ " if is_mine else ""
+            btn_text     = f"{check}{v['artist']}, {v['title']}{price_str}"
             keyboard.append([{"text": btn_text, "callback_data": f"regalo_{v['id']}"}])
 
         if not keyboard:
@@ -539,6 +539,62 @@ def send_regali_list(chat_id) -> None:
 
     except Exception as exc:
         logger.error("Errore generazione lista regali: %s", exc)
+
+# ---------------------------------------------------------------------------
+# /get-all — full list for the owner (CHAT_ID only)
+# ---------------------------------------------------------------------------
+
+def send_get_all(chat_id) -> None:
+    """Send a plain-text summary of ALL vinyls (active, reserved, inactive) to the owner."""
+    try:
+        res = supabase.table("vinyls").select(
+            "id, artist, title, is_active, reserved_by, sources(site_name, current_price)"
+        ).execute()
+
+        vinyls = sorted(
+            res.data or [],
+            key=lambda x: (x.get("artist", "").lower(), x.get("title", "").lower()),
+        )
+
+        if not vinyls:
+            send_telegram_message(chat_id, "Nessun vinile nel database.")
+            return
+
+        # Fetch friends to resolve reserved_by chat_id -> name
+        res_friends = supabase.table("friends").select("chat_id, name").execute()
+        friends_map = {str(f["chat_id"]): f.get("name") or str(f["chat_id"]) for f in (res_friends.data or [])}
+
+        active, reserved, inactive = [], [], []
+        for v in vinyls:
+            prices  = [s["current_price"] for s in v.get("sources", []) if s.get("current_price") is not None]
+            lowest  = min(prices) if prices else None
+            label   = f"{v['artist']}, {v['title']} - {format_eur(lowest)}"
+
+            if v.get("reserved_by"):
+                who = friends_map.get(str(v["reserved_by"]), str(v["reserved_by"]))
+                reserved.append(f"🎁 {label}  [prenotato da {who}]")
+            elif v.get("is_active"):
+                active.append(f"💿 {label}")
+            else:
+                inactive.append(f"⏸ {label}  [sospeso]")
+
+        lines = ["<b>📋 LISTA COMPLETA VINILI</b>\n"]
+        if active:
+            lines.append(f"<b>Attivi ({len(active)})</b>")
+            lines.extend(active)
+        if reserved:
+            lines.append(f"\n<b>Prenotati ({len(reserved)})</b>")
+            lines.extend(reserved)
+        if inactive:
+            lines.append(f"\n<b>Sospesi ({len(inactive)})</b>")
+            lines.extend(inactive)
+
+        send_telegram_message(chat_id, "\n".join(lines))
+
+    except Exception as exc:
+        logger.error("Errore send_get_all: %s", exc)
+        send_telegram_message(chat_id, "❌ Errore nel recupero della lista.")
+
 
 # ---------------------------------------------------------------------------
 # Flask routes
@@ -577,14 +633,71 @@ def _handle_message(msg: dict) -> None:
     text     = msg.get("text", "").strip()
     reply_to = msg.get("reply_to_message")
 
+    # ---- Commands ----
     if text in ("/start regali", "/regali"):
         send_regali_list(chat_id)
         return
 
-    # Reply-to flow: user is pasting a URL for a vinyl
-    if reply_to and reply_to.get("text") and "[ID_VINILE:" in reply_to.get("text", ""):
+    if text == "/set-name":
         try:
-            record_id = reply_to["text"].split("[ID_VINILE:")[1].split("]")[0]
+            res = supabase.table("friends").select("name").eq("chat_id", chat_id).execute()
+            existing_name = res.data[0].get("name") if res.data else None
+        except Exception:
+            existing_name = None
+
+        if existing_name:
+            prompt = (
+                f"Il tuo nome attuale è <b>{existing_name}</b>.\n\n"
+                "Vuoi cambiarlo? Rispondi a questo messaggio con il nuovo nome (max due parole).\n"
+                "[SET_NAME]"
+            )
+        else:
+            prompt = (
+                "Come ti chiami? Rispondi a questo messaggio con il tuo nome (max due parole).\n"
+                "[SET_NAME]"
+            )
+        send_telegram_message(chat_id, prompt, keyboard={"force_reply": True})
+        return
+
+    if text == "/get-all":
+        if str(chat_id) != str(CHAT_ID):
+            send_telegram_message(chat_id, "⛔ Comando riservato per Adriana.")
+            return
+        send_get_all(chat_id)
+        return
+
+    # ---- Reply-to flows ----
+    if not reply_to or not reply_to.get("text"):
+        return
+
+    reply_text = reply_to.get("text", "")
+
+    # Set-name reply
+    if "[SET_NAME]" in reply_text:
+        words = text.split()
+        if not words or len(words) > 2 or not all(w.isalpha() for w in words):
+            send_telegram_message(
+                chat_id,
+                "⚠️ Nome non valido. Usa al massimo due parole, solo lettere. Riprova con /set-name."
+            )
+            return
+        name = " ".join(w.capitalize() for w in words)
+        try:
+            existing = supabase.table("friends").select("chat_id").eq("chat_id", chat_id).execute()
+            if existing.data:
+                supabase.table("friends").update({"name": name}).eq("chat_id", chat_id).execute()
+            else:
+                supabase.table("friends").insert({"chat_id": chat_id, "name": name}).execute()
+            send_telegram_message(chat_id, f"✅ Nome salvato: <b>{name}</b>. Grazie!")
+        except Exception as exc:
+            logger.error("Errore salvataggio nome: %s", exc)
+            send_telegram_message(chat_id, "❌ Errore nel salvare il nome. Riprova più tardi.")
+        return
+
+    # Add-link reply
+    if "[ID_VINILE:" in reply_text:
+        try:
+            record_id = reply_text.split("[ID_VINILE:")[1].split("]")[0]
         except (IndexError, KeyError):
             return
 
@@ -648,7 +761,7 @@ def _handle_callback(cb: dict) -> None:
                 return
 
             v        = res.data[0]
-            stats_msg = f"📊 <b>STATISTICHE</b>\n<b>{v['artist']} — {v['title']}</b>\n\n"
+            stats_msg = f"📊 <b>STATISTICHE</b>\n<b>{v['artist']} - {v['title']}</b>\n\n"
             for s in v["sources"]:
                 stats_msg += (
                     f"<b>{s['site_name']}</b>\n"
@@ -716,7 +829,7 @@ def _handle_callback(cb: dict) -> None:
             is_mine     = str(v.get("reserved_by")) == str(chat_id)
             is_available = v.get("reserved_by") is None
 
-            caption = f"<b>{v['artist']} — {v['title']}</b>\n\n"
+            caption = f"<b>{v['artist']} - {v['title']}</b>\n\n"
             if is_mine:
                 caption += "✅ <i>Hai prenotato questo vinile.</i>\n\n"
             elif not is_available:
