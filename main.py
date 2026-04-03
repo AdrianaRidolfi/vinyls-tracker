@@ -638,7 +638,7 @@ def _handle_message(msg: dict) -> None:
         send_regali_list(chat_id)
         return
 
-    if text == "/set-name":
+    if text == "/set_name":
         try:
             res = supabase.table("friends").select("name").eq("chat_id", chat_id).execute()
             existing_name = res.data[0].get("name") if res.data else None
@@ -672,13 +672,13 @@ def _handle_message(msg: dict) -> None:
 
     reply_text = reply_to.get("text", "")
 
-    # Set-name reply
+    # set_name reply
     if "[SET_NAME]" in reply_text:
         words = text.split()
         if not words or len(words) > 2 or not all(w.isalpha() for w in words):
             send_telegram_message(
                 chat_id,
-                "⚠️ Nome non valido. Usa al massimo due parole, solo lettere. Riprova con /set-name."
+                "⚠️ Nome non valido. Usa al massimo due parole, solo lettere. Riprova con /set_name."
             )
             return
         name = " ".join(w.capitalize() for w in words)
