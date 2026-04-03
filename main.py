@@ -421,7 +421,39 @@ def telegram_webhook():
         chat_id = msg.get("chat", {}).get("id")
         text = msg.get("text", "")
         reply_to = msg.get("reply_to_message")
+        
+        if text.strip() == "/start regali":
+            # Registra il chat_id nella tabella friends
+            try:
+                check_friend = supabase.table("friends").select("chat_id").eq("chat_id", chat_id).execute()
+                if not check_friend.data:
+                    supabase.table("friends").insert({"chat_id": chat_id}).execute()
+            except Exception as e:
+                logger.error(f"Errore inserimento chat_id in friends: {e}")
 
+            url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            
+            try:
+                res = supabase.table("vinyls").select("id, artist, title").eq("is_active", True).execute()
+                vinyls = res.data
+
+                if not vinyls:
+                    payload = {"chat_id": chat_id, "text": "Nessun vinile attivo al momento."}
+                else:
+                    keyboard = []
+                    for v in vinyls:
+                        keyboard.append([{"text": f"{v['artist']} - {v['title']}", "callback_data": f"regalo_{v['id']}"}])
+                    
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": "Ecco i vinili attualmente in monitoraggio. Clicca su un titolo per vedere i prezzi:",
+                        "reply_markup": {"inline_keyboard": keyboard}
+                    }
+                cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
+            except Exception as e:
+                logger.error(f"Errore start regali: {e}")
+            return "OK", 200
+            
         if reply_to and reply_to.get("text") and "[ID_VINILE:" in reply_to["text"]:
             try:
                 record_id = reply_to["text"].split("[ID_VINILE:")[1].split("]")[0]
@@ -521,6 +553,44 @@ def telegram_webhook():
             }
             cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
 
+        elif action == "regalo":
+            answer_callback(cb_id, "Recupero prezzi...")
+            try:
+                res = supabase.table("vinyls").select("artist, title, cover_url, sources(site_name, current_price, url)").eq("id", record_id).execute()
+                if res.data:
+                    v = res.data[0]
+                    msg = f"<b>{v['artist']} - {v['title']}</b>\n\n"
+                    keyboard = []
+                    
+                    if not v.get("sources"):
+                        msg += "Nessun prezzo disponibile al momento."
+                    else:
+                        for s in v["sources"]:
+                            cp = s.get("current_price")
+                            msg += f"<b>{s['site_name']}</b>: {format_eur(cp)}\n"
+                            if cp is not None and s.get("url"):
+                                keyboard.append([{"text": f"COMPRA SU {s['site_name'].upper()}", "url": s['url']}])
+                    
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": msg,
+                        "parse_mode": "HTML"
+                    }
+                    if keyboard:
+                        payload["reply_markup"] = {"inline_keyboard": keyboard}
+                        
+                    if v.get("cover_url"):
+                        url_photo = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+                        payload["photo"] = v["cover_url"]
+                        payload["caption"] = payload.pop("text")
+                        cloudscraper.create_scraper().post(url_photo, json=payload, timeout=5)
+                    else:
+                        url_send = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                        cloudscraper.create_scraper().post(url_send, json=payload, timeout=5)
+                        
+            except Exception as e:
+                logger.error(f"Errore dettaglio regalo: {e}")
+                
     return "OK", 200
 
 if __name__ == '__main__':
