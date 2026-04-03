@@ -420,13 +420,13 @@ def telegram_webhook():
     def send_regali_list(chat_id, message_id=None):
         try:
             # Controllo se l'utente esiste e se ha un nome
-            res_friend = supabase.table("friends").select("nome").eq("chat_id", chat_id).execute()
+            res_friend = supabase.table("friends").select("name").eq("chat_id", chat_id).execute()
             
             if not res_friend.data:
                 supabase.table("friends").insert({"chat_id": chat_id}).execute()
                 nome = None
             else:
-                nome = res_friend.data[0].get("nome")
+                nome = res_friend.data[0].get("name")
 
             if nome:
                 text = f"Bentornato/a {nome}! 🎁\n\nEcco i vinili attualmente in lista:"
