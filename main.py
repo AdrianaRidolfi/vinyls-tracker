@@ -6,6 +6,7 @@ import random
 import logging
 import sys
 import threading
+from datetime import datetime, timezone
 
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -40,6 +41,9 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABAS
 _scraper = cloudscraper.create_scraper(
     browser={"browser": "chrome", "platform": "windows", "desktop": True}
 )
+
+# Prevents concurrent scraper runs if /trigger is called more than once
+_scraper_running = threading.Lock()
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -344,15 +348,19 @@ def build_initial_monitoring_message(artist: str, title: str, new_prices: list, 
     return msg, keyboard
 
 
-def build_price_drop_message(artist: str, title: str, new_prices: list, lowest: dict, old_lowest: float) -> tuple[str, list]:
+def build_price_drop_message(artist: str, title: str, new_prices: list, lowest: dict, old_lowest: float, is_record: bool) -> tuple[str, list]:
     others   = [p for p in new_prices if p["site_name"] != lowest["site_name"]]
     drop_eur = old_lowest - lowest["price"]
     drop_pct = (drop_eur / old_lowest) * 100
 
-    msg  = "🔥 <b>CALO DI PREZZO!</b>\n\n"
+    if is_record:
+        msg  = "🚨 <b>NUOVO MINIMO STORICO!</b>\n\n"
+    else:
+        msg  = "📉 <b>IL PREZZO È TORNATO A SCENDERE</b>\n\n"
+
     msg += f"<b>{artist} - {title}</b>\n\n"
-    msg += f"📉 Il prezzo minimo è sceso a <b>{format_eur(lowest['price'])}</b> su <b>{lowest['site_name']}</b>\n"
-    msg += f"💰 <b>Risparmio:</b> {format_eur(drop_eur)} ({drop_pct:.1f}% in meno)\n"
+    msg += f"Il prezzo minimo attuale è <b>{format_eur(lowest['price'])}</b> su <b>{lowest['site_name']}</b>\n"
+    msg += f"💰 <b>Risparmio:</b> {format_eur(drop_eur)} ({drop_pct:.1f}% in meno rispetto all'ultimo controllo)\n"
 
     if others:
         msg += "\n<b>Confronto con gli altri siti:</b>\n"
@@ -378,9 +386,9 @@ def update_source_in_db(source: dict, new_price: float) -> None:
     source_id        = source["id"]
 
     update_payload = {
-        "last_price":   current_db_price,
+        "last_price":    current_db_price,
         "current_price": new_price,
-        "updated_at":   "now()",
+        "updated_at":    datetime.now(timezone.utc).isoformat(),
     }
     if current_ath is None or current_ath == 0 or new_price < current_ath:
         update_payload["ath_price"] = new_price
@@ -409,6 +417,10 @@ def process_vinyl(vinyl: dict) -> None:
 
     old_prices = [s["current_price"] for s in sources if s.get("current_price") is not None]
     old_lowest = min(old_prices) if old_prices else None
+
+    # Retrieve the absolute lowest price recorded so far across all sources for this vinyl
+    valid_aths = [s.get("ath_price") for s in sources if s.get("ath_price") is not None]
+    global_ath = min(valid_aths) if valid_aths else None
 
     new_prices_data: list[dict] = []
     cover_updated = False
@@ -447,7 +459,9 @@ def process_vinyl(vinyl: dict) -> None:
         return
 
     if new_lowest < old_lowest:
-        msg, keyboard = build_price_drop_message(artist, title, new_prices_data, lowest_data, old_lowest)
+        # Determine if this is an all-time record for this specific vinyl
+        is_record = global_ath is None or new_lowest < global_ath
+        msg, keyboard = build_price_drop_message(artist, title, new_prices_data, lowest_data, old_lowest, is_record)
         send_telegram_alert(msg, vinyl_id, cover_url, keyboard)
         logger.info("[%s - %s] Notifica calo prezzo inviata.", artist, title)
 
@@ -541,8 +555,26 @@ def send_regali_list(chat_id) -> None:
         logger.error("Errore generazione lista regali: %s", exc)
 
 # ---------------------------------------------------------------------------
-# /get-all — full list for the owner (CHAT_ID only)
+# /getall — full list for the owner (CHAT_ID only)
 # ---------------------------------------------------------------------------
+
+def _send_chunked(chat_id, text: str, max_len: int = 4000) -> None:
+    """Send a long message in ≤ max_len chunks, splitting on newlines."""
+    if len(text) <= max_len:
+        send_telegram_message(chat_id, text)
+        return
+    chunk = ""
+    for line in text.split("\n"):
+        candidate = (chunk + "\n" + line).lstrip("\n") if chunk else line
+        if len(candidate) > max_len:
+            if chunk:
+                send_telegram_message(chat_id, chunk)
+            chunk = line
+        else:
+            chunk = candidate
+    if chunk:
+        send_telegram_message(chat_id, chunk)
+
 
 def send_get_all(chat_id) -> None:
     """Send a plain-text summary of ALL vinyls (active, reserved, inactive) to the owner."""
@@ -589,7 +621,7 @@ def send_get_all(chat_id) -> None:
             lines.append(f"\n<b>Sospesi ({len(inactive)})</b>")
             lines.extend(inactive)
 
-        send_telegram_message(chat_id, "\n".join(lines))
+        _send_chunked(chat_id, "\n".join(lines))
 
     except Exception as exc:
         logger.error("Errore send_get_all: %s", exc)
@@ -606,8 +638,16 @@ def trigger():
     if token != SCRAPER_TOKEN:
         return "Non autorizzato", 401
 
-    thread = threading.Thread(target=run_scraper, daemon=True)
-    thread.start()
+    if not _scraper_running.acquire(blocking=False):
+        return "Scraper già in esecuzione", 429
+
+    def _run():
+        try:
+            run_scraper()
+        finally:
+            _scraper_running.release()
+
+    threading.Thread(target=_run, daemon=True).start()
     return "Scraper avviato in background", 200
 
 
@@ -634,7 +674,7 @@ def _handle_message(msg: dict) -> None:
     reply_to = msg.get("reply_to_message")
 
     # ---- Commands ----
-    if text in ("/start regali", "/regali"):
+    if text in ("/start", "/start regali", "/regali"):
         send_regali_list(chat_id)
         return
 
@@ -659,7 +699,7 @@ def _handle_message(msg: dict) -> None:
         send_telegram_message(chat_id, prompt, keyboard={"force_reply": True})
         return
 
-    if text == "/get-all":
+    if text == "/getall":
         if str(chat_id) != str(CHAT_ID):
             send_telegram_message(chat_id, "⛔ Comando riservato per Adriana.")
             return
@@ -753,7 +793,7 @@ def _handle_callback(cb: dict) -> None:
         answer_callback(cb_id, "Recupero statistiche…")
         try:
             res = supabase.table("vinyls").select(
-                "artist, title, sources(site_name, current_price, ath_price)"
+                "artist, title, sources(site_name, current_price, last_price, ath_price)"
             ).eq("id", record_id).execute()
 
             if not res.data or not res.data[0].get("sources"):
@@ -763,10 +803,28 @@ def _handle_callback(cb: dict) -> None:
             v        = res.data[0]
             stats_msg = f"📊 <b>STATISTICHE</b>\n<b>{v['artist']} - {v['title']}</b>\n\n"
             for s in v["sources"]:
+                cur  = s.get("current_price")
+                last = s.get("last_price")
+                ath  = s.get("ath_price")
+
+                if cur is not None and last is not None:
+                    if cur < last:
+                        trend = f"📉 {format_eur(last)} → {format_eur(cur)}"
+                    elif cur > last:
+                        trend = f"📈 {format_eur(last)} → {format_eur(cur)}"
+                    else:
+                        trend = f"➡️ stabile a {format_eur(cur)}"
+                else:
+                    trend = "N/D"
+
+                is_ath_now = ath is not None and cur is not None and cur == ath
+                ath_label  = format_eur(ath) + (" ⭐ (minimo attuale)" if is_ath_now else "")
+
                 stats_msg += (
                     f"<b>{s['site_name']}</b>\n"
-                    f"   Prezzo attuale:    {format_eur(s.get('current_price'))}\n"
-                    f"   Minimo storico:    {format_eur(s.get('ath_price'))}\n\n"
+                    f"   Prezzo attuale:     {format_eur(cur)}\n"
+                    f"   Minimo storico:     {ath_label}\n"
+                    f"   Andamento:          {trend}\n\n"
                 )
 
             send_telegram_message(
