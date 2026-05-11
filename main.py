@@ -839,7 +839,7 @@ def _handle_callback(cb: dict) -> None:
 
             v         = res.data[0]
             stats_msg = f"📊 <b>STATISTICHE — {v['artist']} - {v['title']}</b>\n"
-            stats_msg += "─" * 28 + "\n"
+            stats_msg += "─" * 15 + "\n"
 
             for s in v["sources"]:
                 cur  = s.get("current_price")
